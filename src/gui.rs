@@ -2,11 +2,15 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
 use crossbeam_channel::{unbounded, Receiver};
-use eframe::egui::{self, Color32, ColorImage, RichText, TextureHandle, TextureOptions};
+use eframe::egui::{
+    self, Color32, ColorImage, Frame, Margin, RichText, Rounding, Stroke, TextureHandle,
+    TextureOptions,
+};
 
 use crate::decoder::{NativeTicoRawDecoder, TicoRawDecoder};
 use crate::demuxer::{demux_nev_file, NevDemuxedContainer};
@@ -15,6 +19,9 @@ use crate::metal_pipeline::{ColorPipelineParams, MetalColorPipeline, ScaleMode};
 use crate::{
     generate_sample_nev_file, transcode_nev_file_with_progress, TranscodeOptions, TranscodeReport,
 };
+
+/// Embedded 256x256 PNG application icon used for the macOS Dock icon and in-app branding.
+const APP_ICON_PNG: &[u8] = include_bytes!("../assets/logo_256.png");
 
 #[derive(Debug, Clone)]
 struct QueuedClip {
@@ -42,19 +49,25 @@ enum WorkerEvent {
     Error(String),
 }
 
-/// Launches the native macOS `nev2prores` Studio GUI window.
+/// Launches the native macOS `nev2prores` Studio GUI window with custom Dock icon and dark studio theme.
 pub fn run_native_gui(
     initial_input: Option<PathBuf>,
     initial_output: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title(
+            "nev2prores Studio — Native macOS Nikon N-RAW (.nev) to 12-Bit ProRes 4444 / N-Log",
+        )
+        .with_inner_size([1400.0, 880.0])
+        .with_min_inner_size([1080.0, 700.0])
+        .with_drag_and_drop(true);
+
+    if let Ok(icon_data) = eframe::icon_data::from_png_bytes(APP_ICON_PNG) {
+        viewport = viewport.with_icon(Arc::new(icon_data));
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title(
-                "nev2prores — Native macOS Nikon N-RAW (.nev) to 12-Bit ProRes 4444 / N-Log Studio",
-            )
-            .with_inner_size([1360.0, 860.0])
-            .with_min_inner_size([1024.0, 680.0])
-            .with_drag_and_drop(true),
+        viewport,
         ..Default::default()
     };
 
@@ -62,8 +75,9 @@ pub fn run_native_gui(
         "nev2prores",
         native_options,
         Box::new(move |cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            apply_studio_theme(&cc.egui_ctx, true);
             Ok(Box::new(Nev2ProResGuiApp::new(
+                &cc.egui_ctx,
                 initial_input,
                 initial_output,
             )))
@@ -72,9 +86,76 @@ pub fn run_native_gui(
     .map_err(|e| anyhow::anyhow!("Failed to launch eframe native GUI: {}", e))
 }
 
+/// Applies the custom Cinema Pro Dark Mode (or Light Mode) palette to `egui::Context`,
+/// overriding macOS system theme events so the grading environment stays consistent.
+fn apply_studio_theme(ctx: &egui::Context, dark_mode: bool) {
+    if dark_mode {
+        ctx.set_theme(egui::Theme::Dark);
+        let mut visuals = egui::Visuals::dark();
+        visuals.panel_fill = Color32::from_rgb(20, 22, 27);
+        visuals.window_fill = Color32::from_rgb(24, 27, 34);
+        visuals.extreme_bg_color = Color32::from_rgb(12, 13, 16);
+        visuals.faint_bg_color = Color32::from_rgb(28, 31, 39);
+        visuals.code_bg_color = Color32::from_rgb(16, 18, 23);
+        visuals.selection.bg_fill = Color32::from_rgb(215, 165, 0);
+        visuals.selection.stroke = Stroke::new(1.0_f32, Color32::from_rgb(255, 220, 60));
+        visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(26, 29, 36);
+        visuals.widgets.noninteractive.bg_stroke =
+            Stroke::new(1.0_f32, Color32::from_rgb(44, 49, 60));
+        visuals.widgets.noninteractive.fg_stroke =
+            Stroke::new(1.0_f32, Color32::from_rgb(215, 220, 230));
+        visuals.widgets.inactive.bg_fill = Color32::from_rgb(34, 38, 48);
+        visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(56, 62, 76));
+        visuals.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(230, 234, 242));
+        visuals.widgets.hovered.bg_fill = Color32::from_rgb(48, 54, 68);
+        visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(245, 196, 0));
+        visuals.widgets.active.bg_fill = Color32::from_rgb(62, 68, 86);
+        visuals.widgets.active.bg_stroke = Stroke::new(1.5_f32, Color32::from_rgb(255, 210, 0));
+        ctx.set_visuals(visuals);
+    } else {
+        ctx.set_theme(egui::Theme::Light);
+        ctx.set_visuals(egui::Visuals::light());
+    }
+}
+
+/// Renders a subtle `[?]` badge that displays a detailed technical tooltip on hover.
+fn info_badge(ui: &mut egui::Ui, tooltip: &str) {
+    ui.add(
+        egui::Label::new(
+            RichText::new("[?]")
+                .small()
+                .monospace()
+                .color(Color32::from_rgb(140, 155, 185)),
+        )
+        .sense(egui::Sense::hover()),
+    )
+    .on_hover_text(tooltip);
+}
+
+/// Styled container frame for sidebar cards.
+fn studio_card_frame(dark_mode: bool) -> Frame {
+    let fill = if dark_mode {
+        Color32::from_rgb(27, 30, 38)
+    } else {
+        Color32::from_rgb(244, 245, 248)
+    };
+    let stroke = if dark_mode {
+        Color32::from_rgb(46, 52, 66)
+    } else {
+        Color32::from_rgb(210, 214, 222)
+    };
+    Frame::none()
+        .fill(fill)
+        .stroke(Stroke::new(1.0_f32, stroke))
+        .rounding(Rounding::same(6.0))
+        .inner_margin(Margin::same(10.0))
+}
+
 pub struct Nev2ProResGuiApp {
     gpu: Option<MetalColorPipeline>,
     gpu_name: String,
+    dark_mode: bool,
+    logo_texture: Option<TextureHandle>,
     clips: Vec<QueuedClip>,
     selected_clip_idx: Option<usize>,
     output_dir: PathBuf,
@@ -93,6 +174,7 @@ pub struct Nev2ProResGuiApp {
     preview_frame_idx: usize,
     cached_bayer_key: Option<(PathBuf, usize)>,
     cached_bayer_rggb: Vec<u16>,
+    cached_nlog_rgb: Vec<[f32; 3]>,
     preview_dirty: bool,
     preview_texture: Option<TextureHandle>,
     last_gpu_ms: f64,
@@ -108,7 +190,11 @@ pub struct Nev2ProResGuiApp {
 }
 
 impl Nev2ProResGuiApp {
-    pub fn new(initial_input: Option<PathBuf>, initial_output: Option<PathBuf>) -> Self {
+    pub fn new(
+        ctx: &egui::Context,
+        initial_input: Option<PathBuf>,
+        initial_output: Option<PathBuf>,
+    ) -> Self {
         let (gpu, gpu_name) = match MetalColorPipeline::new() {
             Ok(p) => {
                 let name = p.device_name();
@@ -116,6 +202,16 @@ impl Nev2ProResGuiApp {
             }
             Err(e) => (None, format!("Unavailable ({})", e)),
         };
+
+        let logo_texture = eframe::icon_data::from_png_bytes(APP_ICON_PNG)
+            .ok()
+            .map(|icon| {
+                let image = ColorImage::from_rgba_unmultiplied(
+                    [icon.width as usize, icon.height as usize],
+                    &icon.rgba,
+                );
+                ctx.load_texture("app_logo_badge", image, TextureOptions::LINEAR)
+            });
 
         let default_out = initial_output.unwrap_or_else(|| {
             if let Ok(cwd) = std::env::current_dir() {
@@ -132,6 +228,8 @@ impl Nev2ProResGuiApp {
         let mut app = Self {
             gpu,
             gpu_name,
+            dark_mode: true,
+            logo_texture,
             clips: Vec::new(),
             selected_clip_idx: None,
             output_dir: default_out,
@@ -146,6 +244,7 @@ impl Nev2ProResGuiApp {
             preview_frame_idx: 0,
             cached_bayer_key: None,
             cached_bayer_rggb: Vec::new(),
+            cached_nlog_rgb: Vec::new(),
             preview_dirty: true,
             preview_texture: None,
             last_gpu_ms: 0.0,
@@ -172,14 +271,17 @@ impl Nev2ProResGuiApp {
             match demux_nev_file(path) {
                 Ok(container) => {
                     let as_shot_k = container.metadata.color_temperature_kelvin;
-                    if !self.clips.iter().any(|c| c.path == path) {
+                    if let Some(existing_idx) = self.clips.iter().position(|c| c.path == path) {
+                        self.clips[existing_idx].container = container;
+                        self.select_clip(existing_idx, as_shot_k);
+                    } else {
                         self.clips.push(QueuedClip {
                             path: path.to_path_buf(),
                             container,
                         });
+                        let new_idx = self.clips.len() - 1;
+                        self.select_clip(new_idx, as_shot_k);
                     }
-                    let new_idx = self.clips.len() - 1;
-                    self.select_clip(new_idx, as_shot_k);
                     self.status_banner = format!("Loaded '{}'", path.display());
                 }
                 Err(e) => {
@@ -258,7 +360,7 @@ impl Nev2ProResGuiApp {
             return;
         };
 
-        // 2. Run Apple Metal Compute Shader (using Half scale if width > 1280 for >60fps interactive scrubbing)
+        // 2. Run Apple Metal Compute Shader (using Half scale if width >= 1280 for >60fps interactive scrubbing)
         let preview_scale = if clip.container.width >= 1280 {
             ScaleMode::Half
         } else {
@@ -297,19 +399,25 @@ impl Nev2ProResGuiApp {
         // 3. Convert RGBA16F N-Log buffer into 8-bit sRGB `egui::ColorImage` for viewport display
         let num_pixels = (out_w as usize) * (out_h as usize);
         let mut pixels = Vec::with_capacity(num_pixels);
+        self.cached_nlog_rgb.clear();
+        self.cached_nlog_rgb.reserve(num_pixels);
         let apply_lut = self.display_rec709_lut;
 
         for chunk in rgba_f16.as_chunks::<4>().0 {
-            let mut r = chunk[0].to_f32().clamp(0.0, 1.0);
-            let mut g = chunk[1].to_f32().clamp(0.0, 1.0);
-            let mut b = chunk[2].to_f32().clamp(0.0, 1.0);
+            let r_nlog = chunk[0].to_f32().clamp(0.0, 1.0);
+            let g_nlog = chunk[1].to_f32().clamp(0.0, 1.0);
+            let b_nlog = chunk[2].to_f32().clamp(0.0, 1.0);
+            self.cached_nlog_rgb.push([r_nlog, g_nlog, b_nlog]);
 
-            if apply_lut {
-                // Soft S-curve display LUT transforming N-Log to Rec.709 monitoring contrast
-                r = nlog_to_display_gamma(r);
-                g = nlog_to_display_gamma(g);
-                b = nlog_to_display_gamma(b);
-            }
+            let (r, g, b) = if apply_lut {
+                (
+                    nlog_to_display_gamma(r_nlog),
+                    nlog_to_display_gamma(g_nlog),
+                    nlog_to_display_gamma(b_nlog),
+                )
+            } else {
+                (r_nlog, g_nlog, b_nlog)
+            };
 
             pixels.push(Color32::from_rgb(
                 (r * 255.0).round() as u8,
@@ -510,13 +618,15 @@ fn nlog_to_display_gamma(v: f32) -> f32 {
     } else {
         ((y - 619.0) / 150.0).exp()
     };
-    // Simple filmic shoulder + Rec.709 1/2.2 display gamma
     let mapped = linear / (1.0 + linear * 0.35);
     mapped.powf(1.0 / 2.2).clamp(0.0, 1.0)
 }
 
 impl eframe::App for Nev2ProResGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Enforce our selected Studio Dark/Light theme on every frame so OS theme notifications never override it
+        apply_studio_theme(ctx, self.dark_mode);
+
         self.poll_worker_events();
         if self.is_transcoding {
             ctx.request_repaint();
@@ -538,14 +648,40 @@ impl eframe::App for Nev2ProResGuiApp {
             self.refresh_gpu_preview(ctx);
         }
 
+        // ====================================================================
         // Top Toolbar
+        // ====================================================================
         egui::TopBottomPanel::top("top_toolbar").show(ctx, |ui| {
-            ui.add_space(4.0);
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("nev2prores Studio").strong());
+                if let Some(ref logo) = self.logo_texture {
+                    ui.add(
+                        egui::Image::new(logo)
+                            .fit_to_exact_size(egui::vec2(26.0, 26.0))
+                            .rounding(Rounding::same(5.0)),
+                    );
+                }
+                ui.heading(
+                    RichText::new("nev2prores")
+                        .strong()
+                        .color(Color32::from_rgb(255, 210, 0)),
+                )
+                .on_hover_text(
+                    "Native macOS Apple Silicon Nikon N-RAW (.nev) to 12-Bit Apple ProRes 4444 / N-Log Transcoder.\n\
+                     Built with Rust + Apple Metal Compute Shaders + VideoToolbox (Zero FFmpeg wrappers).",
+                );
+                ui.label(RichText::new("STUDIO").small().weak());
+
                 ui.separator();
 
-                if ui.button("📂 Open .NEV File(s)...").clicked() {
+                if ui
+                    .button("📂 Open .NEV File(s)...")
+                    .on_hover_text(
+                        "Open one or more Nikon Z8 / Z9 N-RAW (.nev) video files using the native macOS file picker.\n\
+                         Tip: You can also drag and drop .nev files directly anywhere onto this window.",
+                    )
+                    .clicked()
+                {
                     if let Some(files) = rfd::FileDialog::new()
                         .add_filter("Nikon N-RAW (.nev)", &["nev", "NEV", "mov", "MOV"])
                         .pick_files()
@@ -556,13 +692,30 @@ impl eframe::App for Nev2ProResGuiApp {
                     }
                 }
 
-                if ui.button("📁 Open Folder...").clicked() {
+                if ui
+                    .button("📁 Open Folder...")
+                    .on_hover_text(
+                        "Scan an entire camera card or directory for .nev clips and add them all to the batch queue.",
+                    )
+                    .clicked()
+                {
                     if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                         self.add_path(&dir);
                     }
                 }
 
-                if ui.button("🧪 Generate Sample .NEV Clip").clicked() {
+                if ui
+                    .button("▶ Generate Sample .NEV Clip")
+                    .on_hover_text(
+                        "Synthesizes a 24-frame 1920x1080 12-bit RGGB Nikon Z9 .nev test file containing:\n\
+                         • 75% SMPTE color bars + scene-linear grayscale exposure ramp\n\
+                         • 24-bit 48 kHz Stereo Linear PCM audio track (in24)\n\
+                         • SMPTE Timecode track (tmcd @ 01:00:00:00)\n\
+                         • Nikon NCDT MakerNote with Tag 0x000C (WB_RBLevels) & Tag 0x003D (BlackLevel)\n\n\
+                         Ideal for testing the Metal GPU debayer & grading sliders without a camera card attached.",
+                    )
+                    .clicked()
+                {
                     let sample_path = std::env::temp_dir().join("Nikon_Z9_Sample_1080p.NEV");
                     match generate_sample_nev_file(&sample_path) {
                         Ok(()) => self.add_path(&sample_path),
@@ -572,26 +725,64 @@ impl eframe::App for Nev2ProResGuiApp {
                     }
                 }
 
-                ui.separator();
-                ui.label(
-                    RichText::new(format!("GPU: {}", self.gpu_name))
-                        .color(Color32::from_rgb(120, 220, 160)),
-                );
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let theme_label = if self.dark_mode {
+                        "🌙 Dark Studio"
+                    } else {
+                        "☀ Light Mode"
+                    };
+                    if ui
+                        .button(theme_label)
+                        .on_hover_text(
+                            "Toggle between Cinema Pro Dark Studio mode (recommended for accurate color grading) and Light mode.",
+                        )
+                        .clicked()
+                    {
+                        self.dark_mode = !self.dark_mode;
+                    }
+
+                    ui.separator();
+
+                    ui.label(
+                        RichText::new(format!("● Metal GPU: {}", self.gpu_name))
+                            .small()
+                            .monospace()
+                            .color(Color32::from_rgb(95, 225, 145)),
+                    )
+                    .on_hover_text(
+                        "Zero-copy Unified Memory (MTLResourceOptions::StorageModeShared) active on Apple Silicon.\n\
+                         Unpacked 16-bit RGGB Bayer buffers are shared directly between Rust and the Metal compute shader.",
+                    );
+                });
             });
-            ui.add_space(4.0);
+            ui.add_space(6.0);
         });
 
+        // ====================================================================
         // Bottom Status & Progress Bar
+        // ====================================================================
         egui::TopBottomPanel::bottom("bottom_status").show(ctx, |ui| {
-            ui.add_space(4.0);
+            ui.add_space(5.0);
             ui.horizontal(|ui| {
-                ui.label(&self.status_banner);
+                ui.label(RichText::new(&self.status_banner).small());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(last) = self.completed_reports.last() {
-                        if ui.button("🎬 Open .MOV in QuickTime").clicked() {
+                        if ui
+                            .button("🎬 Open .MOV in QuickTime")
+                            .on_hover_text(
+                                "Launch QuickTime Player to inspect the transcoded 12-bit ProRes 4444 / 422 HQ .mov file.",
+                            )
+                            .clicked()
+                        {
                             let _ = Command::new("open").arg(&last.output_mov_path).spawn();
                         }
-                        if ui.button("🔍 Reveal in Finder").clicked() {
+                        if ui
+                            .button("📂 Reveal in Finder")
+                            .on_hover_text(
+                                "Highlight the transcoded .mov and .fcpxml sidecar files in macOS Finder.",
+                            )
+                            .clicked()
+                        {
                             let _ = Command::new("open")
                                 .arg("-R")
                                 .arg(&last.output_mov_path)
@@ -601,324 +792,492 @@ impl eframe::App for Nev2ProResGuiApp {
                 });
             });
             if self.is_transcoding || self.progress_fraction > 0.0 {
+                ui.add_space(2.0);
                 ui.add(
                     egui::ProgressBar::new(self.progress_fraction)
                         .text(&self.progress_text)
                         .animate(self.is_transcoding),
                 );
             }
-            ui.add_space(4.0);
+            ui.add_space(5.0);
         });
 
-        // Left Panel: Clip Queue & Nikon NCDT MakerNote Inspector
+        // ====================================================================
+        // Left Sidebar: Clip Queue & Nikon NCDT MakerNote Inspector
+        // ====================================================================
         egui::SidePanel::left("left_inspector")
             .resizable(true)
-            .default_width(320.0)
+            .default_width(345.0)
             .show(ctx, |ui| {
-                ui.heading("Clip Queue");
-                ui.separator();
-
-                let mut clicked_idx = None;
-                egui::ScrollArea::vertical()
-                    .max_height(180.0)
-                    .show(ui, |ui| {
-                        if self.clips.is_empty() {
-                            ui.weak("Drop .nev files here or click 'Generate Sample .NEV Clip'.");
-                        }
-                        for (idx, clip) in self.clips.iter().enumerate() {
-                            let selected = self.selected_clip_idx == Some(idx);
-                            let name = clip
-                                .path
-                                .file_name()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("clip.nev");
-                            let (_, _, fps) = clip.container.frame_rate();
-                            let label = format!(
-                                "{} ({}x{}, {}f @ {:.2}fps)",
-                                name,
-                                clip.container.width,
-                                clip.container.height,
-                                clip.container.frames.len(),
-                                fps
-                            );
-                            if ui.selectable_label(selected, label).clicked() {
-                                clicked_idx =
-                                    Some((idx, clip.container.metadata.color_temperature_kelvin));
-                            }
-                        }
-                    });
-
-                if let Some((idx, k)) = clicked_idx {
-                    self.select_clip(idx, k);
-                }
-
-                ui.add_space(8.0);
-                ui.heading("Nikon NCDT MakerNote");
-                ui.separator();
-
-                if let Some(idx) = self.selected_clip_idx {
-                    if let Some(clip) = self.clips.get(idx) {
-                        let c = &clip.container;
-                        let (_, _, fps) = c.frame_rate();
-                        egui::Grid::new("metadata_grid")
-                            .num_columns(2)
-                            .spacing([12.0, 4.0])
-                            .striped(true)
-                            .show(ui, |ui| {
-                                ui.label("Camera:");
-                                ui.label(&c.metadata.camera_model);
-                                ui.end_row();
-
-                                ui.label("Lens:");
-                                ui.label(&c.metadata.lens_model);
-                                ui.end_row();
-
-                                ui.label("Sensor Format:");
-                                ui.label(format!(
-                                    "{}x{} ({}-bit RGGB)",
-                                    c.width, c.height, c.bit_depth
-                                ));
-                                ui.end_row();
-
-                                ui.label("Frame Rate:");
-                                ui.label(format!("{:.3} fps ({} frames)", fps, c.frames.len()));
-                                ui.end_row();
-
-                                ui.label("ISO / Shutter:");
-                                ui.label(format!(
-                                    "ISO {}  |  {}",
-                                    c.metadata.iso_speed,
-                                    c.metadata.shutter_display()
-                                ));
-                                ui.end_row();
-
-                                ui.label("Timecode (tmcd):");
-                                ui.label(
-                                    c.metadata
-                                        .timecode
-                                        .as_deref()
-                                        .unwrap_or("None"),
-                                );
-                                ui.end_row();
-
-                                ui.label("Audio Track:");
-                                if let Some(ref a) = c.audio_track {
-                                    ui.label(format!(
-                                        "{}-bit PCM, {}ch @ {} Hz",
-                                        a.sample_bits, a.channels, a.sample_rate
-                                    ));
-                                } else {
-                                    ui.label("None");
-                                }
-                                ui.end_row();
-
-                                ui.label("WB Gains (0x000C):");
-                                ui.label(format!(
-                                    "R:{:.3} B:{:.3} G:{:.2}",
-                                    c.metadata.wb_rb_levels[0],
-                                    c.metadata.wb_rb_levels[1],
-                                    c.metadata.wb_rb_levels[2]
-                                ));
-                                ui.end_row();
-
-                                ui.label("BlackLevel (0x003D):");
-                                ui.label(format!(
-                                    "{:?} / {}",
-                                    c.metadata.black_level, c.metadata.white_level
-                                ));
-                                ui.end_row();
-                            });
-
-                        ui.add_space(10.0);
-                        ui.label(RichText::new("Bradford Chromatic Adaptation M_WB:").strong());
-                        let params = ColorPipelineParams::from_metadata(
-                            c.width,
-                            c.height,
-                            &c.metadata,
-                            self.scale,
-                            if self.override_wb {
-                                Some(self.kelvin)
-                            } else {
-                                None
-                            },
-                            if self.override_wb {
-                                Some(self.tint)
-                            } else {
-                                None
-                            },
-                            Some(self.ev_stops),
-                        );
-                        let u = params.build_uniforms(c.width);
-                        ui.monospace(format!(
-                            "[{:+.4} {:+.4} {:+.4}]\n[{:+.4} {:+.4} {:+.4}]\n[{:+.4} {:+.4} {:+.4}]",
-                            u.color_matrix_row0[0],
-                            u.color_matrix_row0[1],
-                            u.color_matrix_row0[2],
-                            u.color_matrix_row1[0],
-                            u.color_matrix_row1[1],
-                            u.color_matrix_row1[2],
-                            u.color_matrix_row2[0],
-                            u.color_matrix_row2[1],
-                            u.color_matrix_row2[2],
-                        ));
-                    }
-                } else {
-                    ui.weak("Select a clip to inspect its NCDT metadata.");
-                }
-            });
-
-        // Right Panel: Scene-Linear RAW Controls & ProRes Export Settings
-        egui::SidePanel::right("right_controls")
-            .resizable(true)
-            .default_width(340.0)
-            .show(ctx, |ui| {
-                ui.heading("Scene-Linear RAW Grading");
-                ui.separator();
-
-                if ui
-                    .checkbox(
-                        &mut self.override_wb,
-                        "Override White Balance (Bradford CAT)",
-                    )
-                    .changed()
-                {
-                    self.preview_dirty = true;
-                }
-
-                ui.add_enabled_ui(self.override_wb, |ui| {
-                    ui.label("Color Temperature (Kelvin):");
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut self.kelvin, 2000..=10000)
-                                .suffix(" K")
-                                .step_by(50.0),
-                        )
-                        .changed()
-                    {
-                        self.preview_dirty = true;
-                    }
-
+                ui.add_space(6.0);
+                studio_card_frame(self.dark_mode).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        for &(label, k) in &[
-                            ("3200K", 3200u32),
-                            ("4300K", 4300),
-                            ("5600K", 5600),
-                            ("6500K", 6500),
-                        ] {
-                            if ui.small_button(label).clicked() {
-                                self.kelvin = k;
-                                self.preview_dirty = true;
+                        ui.heading("1. Clip Queue");
+                        info_badge(
+                            ui,
+                            "Stage 1 (src/demuxer.rs): 64-bit ISO-BMFF zero-copy box walker.\n\
+                             Parses moov -> trak -> mdia -> minf -> stbl (stsd, stts, stsc, stsz, co64)\n\
+                             to resolve exact frame file offsets and durations without loading mdat into RAM.",
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if !self.clips.is_empty()
+                                && ui
+                                    .small_button("Clear")
+                                    .on_hover_text("Remove all clips from the queue.")
+                                    .clicked()
+                            {
+                                self.clips.clear();
+                                self.selected_clip_idx = None;
+                                self.preview_texture = None;
                             }
-                        }
+                        });
                     });
+                    ui.separator();
 
-                    ui.add_space(4.0);
-                    ui.label("Green / Magenta Tint Shift:");
-                    if ui
-                        .add(egui::Slider::new(&mut self.tint, -50.0..=50.0).step_by(0.5))
-                        .changed()
-                    {
-                        self.preview_dirty = true;
+                    let mut clicked_idx = None;
+                    egui::ScrollArea::vertical()
+                        .max_height(155.0)
+                        .show(ui, |ui| {
+                            if self.clips.is_empty() {
+                                ui.weak(
+                                    "No clips loaded.\nDrop .nev files here or click '▶ Generate Sample .NEV Clip'.",
+                                );
+                            }
+                            for (idx, clip) in self.clips.iter().enumerate() {
+                                let selected = self.selected_clip_idx == Some(idx);
+                                let name = clip
+                                    .path
+                                    .file_name()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("clip.nev");
+                                let (_, _, fps) = clip.container.frame_rate();
+                                let label = format!(
+                                    "{}  ({}x{}, {}f @ {:.2}fps)",
+                                    name,
+                                    clip.container.width,
+                                    clip.container.height,
+                                    clip.container.frames.len(),
+                                    fps
+                                );
+                                if ui
+                                    .selectable_label(selected, label)
+                                    .on_hover_text(format!("Full Path: {}", clip.path.display()))
+                                    .clicked()
+                                {
+                                    clicked_idx = Some((
+                                        idx,
+                                        clip.container.metadata.color_temperature_kelvin,
+                                    ));
+                                }
+                            }
+                        });
+
+                    if let Some((idx, k)) = clicked_idx {
+                        self.select_clip(idx, k);
                     }
                 });
 
                 ui.add_space(10.0);
-                ui.label(RichText::new("Scene-Linear Exposure (EV Stops):").strong());
-                ui.horizontal(|ui| {
+
+                studio_card_frame(self.dark_mode).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("2. Nikon NCDT MakerNote");
+                        info_badge(
+                            ui,
+                            "Stage 1.3 (src/metadata.rs): Parses moov -> udta -> NCDT.\n\
+                             Scans for the embedded 'Nikon\\0' MakerNote TIFF header (handling both II little-endian\n\
+                             and MM big-endian byte order) to extract sensor calibration and camera exposure tags.",
+                        );
+                    });
+                    ui.separator();
+
+                    if let Some(idx) = self.selected_clip_idx {
+                        if let Some(clip) = self.clips.get(idx) {
+                            let c = &clip.container;
+                            let (_, _, fps) = c.frame_rate();
+                            egui::Grid::new("metadata_grid")
+                                .num_columns(2)
+                                .spacing([12.0, 6.0])
+                                .striped(true)
+                                .show(ui, |ui| {
+                                    ui.label("Camera Body:")
+                                        .on_hover_text("TIFF Tag 0x0110 (Model) extracted from NCDT.");
+                                    ui.strong(&c.metadata.camera_model);
+                                    ui.end_row();
+
+                                    ui.label("Lens:")
+                                        .on_hover_text("Nikon MakerNote Tag 0x0084 / Exif Tag 0xA434 (LensModel).");
+                                    ui.label(&c.metadata.lens_model);
+                                    ui.end_row();
+
+                                    ui.label("Sensor Format:")
+                                        .on_hover_text("Dimensions and Bayer CFA bit depth from video track 'stsd' atom.");
+                                    ui.label(format!(
+                                        "{}x{} ({}-bit RGGB)",
+                                        c.width, c.height, c.bit_depth
+                                    ));
+                                    ui.end_row();
+
+                                    ui.label("Frame Rate:")
+                                        .on_hover_text("Computed from 'mdhd' timescale and 'stts' sample duration.");
+                                    ui.label(format!("{:.3} fps ({} frames)", fps, c.frames.len()));
+                                    ui.end_row();
+
+                                    ui.label("ISO / Shutter:")
+                                        .on_hover_text("Nikon Tag 0x0002 (ISO) and Exif Tag 0x829A (ExposureTime).");
+                                    ui.label(format!(
+                                        "ISO {}  |  {}",
+                                        c.metadata.iso_speed,
+                                        c.metadata.shutter_display()
+                                    ));
+                                    ui.end_row();
+
+                                    ui.label("Timecode (tmcd):")
+                                        .on_hover_text(
+                                            "Original SMPTE camera timecode track (tmcd) passed through into the output .mov and FCPXML.",
+                                        );
+                                    ui.monospace(c.metadata.timecode.as_deref().unwrap_or("None"));
+                                    ui.end_row();
+
+                                    ui.label("Audio Track:")
+                                        .on_hover_text(
+                                            "Uncompressed 24-bit Linear PCM audio track copied bit-for-bit into the output .mov container.",
+                                        );
+                                    if let Some(ref a) = c.audio_track {
+                                        ui.label(format!(
+                                            "{}-bit PCM, {}ch @ {} Hz",
+                                            a.sample_bits, a.channels, a.sample_rate
+                                        ));
+                                    } else {
+                                        ui.label("None");
+                                    }
+                                    ui.end_row();
+
+                                    ui.label("WB_RBLevels (0x000C):")
+                                        .on_hover_text(
+                                            "Nikon MakerNote Tag 0x000C: 4 rationals [R_gain, B_gain, G1_gain, G2_gain]\n\
+                                             representing the As-Shot sensor white balance multipliers in scene-linear light.",
+                                        );
+                                    ui.monospace(format!(
+                                        "R:{:.3} B:{:.3} G:{:.2}",
+                                        c.metadata.wb_rb_levels[0],
+                                        c.metadata.wb_rb_levels[1],
+                                        c.metadata.wb_rb_levels[2]
+                                    ));
+                                    ui.end_row();
+
+                                    ui.label("BlackLevel (0x003D):")
+                                        .on_hover_text(
+                                            "Nikon MakerNote Tag 0x003D: 4 u16 RGGB optical black subtraction levels in ADU,\n\
+                                             normalized against WhiteLevel (4095 for 12-bit, 16383 for 14-bit) in the Metal shader.",
+                                        );
+                                    ui.monospace(format!(
+                                        "{:?} / {}",
+                                        c.metadata.black_level, c.metadata.white_level
+                                    ));
+                                    ui.end_row();
+                                });
+
+                            ui.add_space(10.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Bradford Adaptation Matrix M_WB").strong());
+                                info_badge(
+                                    ui,
+                                    "3x3 Scene-Linear Color Matrix computed on the host in Rust (src/metadata.rs):\n\
+                                     M_WB = M_(XYZ->Rec2020) * M_B^(-1) * diag(M_B*W_src / M_B*W_dst) * M_B * M_(Camera->XYZ)\n\n\
+                                     Adapts camera native RGB from the target Kelvin/Tint illuminant into ITU-R BT.2020 (D65).",
+                                );
+                            });
+                            let params = ColorPipelineParams::from_metadata(
+                                c.width,
+                                c.height,
+                                &c.metadata,
+                                self.scale,
+                                if self.override_wb {
+                                    Some(self.kelvin)
+                                } else {
+                                    None
+                                },
+                                if self.override_wb {
+                                    Some(self.tint)
+                                } else {
+                                    None
+                                },
+                                Some(self.ev_stops),
+                            );
+                            let u = params.build_uniforms(c.width);
+                            ui.monospace(format!(
+                                "[ {:+.4}  {:+.4}  {:+.4} ]\n[ {:+.4}  {:+.4}  {:+.4} ]\n[ {:+.4}  {:+.4}  {:+.4} ]",
+                                u.color_matrix_row0[0],
+                                u.color_matrix_row0[1],
+                                u.color_matrix_row0[2],
+                                u.color_matrix_row1[0],
+                                u.color_matrix_row1[1],
+                                u.color_matrix_row1[2],
+                                u.color_matrix_row2[0],
+                                u.color_matrix_row2[1],
+                                u.color_matrix_row2[2],
+                            ));
+                        }
+                    } else {
+                        ui.weak("Select a clip in the queue above to inspect its Nikon NCDT MakerNote tags.");
+                    }
+                });
+            });
+
+        // ====================================================================
+        // Right Sidebar: Scene-Linear RAW Controls & ProRes Export Settings
+        // ====================================================================
+        egui::SidePanel::right("right_controls")
+            .resizable(true)
+            .default_width(355.0)
+            .show(ctx, |ui| {
+                ui.add_space(6.0);
+                studio_card_frame(self.dark_mode).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("3. Scene-Linear RAW Grading");
+                        info_badge(
+                            ui,
+                            "Stage 3 (shaders/pipeline.metal): All White Balance (Kelvin/Tint) and Exposure (EV)\n\
+                             adjustments are evaluated in 32-bit floating-point scene-linear light AFTER\n\
+                             Malvar-He-Cutler 5x5 demosaicing and BEFORE Nikon N-Log compression—identical to\n\
+                             changing ISO or Kelvin in-camera on a RAW sensor.",
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button("↺ Reset")
+                                .on_hover_text("Reset White Balance and Exposure (EV) to As-Shot camera defaults.")
+                                .clicked()
+                            {
+                                self.override_wb = false;
+                                self.ev_stops = 0.0;
+                                if let Some(idx) = self.selected_clip_idx {
+                                    if let Some(c) = self.clips.get(idx) {
+                                        self.kelvin = c.container.metadata.color_temperature_kelvin;
+                                    }
+                                }
+                                self.tint = 0.0;
+                                self.preview_dirty = true;
+                            }
+                        });
+                    });
+                    ui.separator();
+
                     if ui
-                        .add(
-                            egui::Slider::new(&mut self.ev_stops, -4.0..=4.0)
-                                .suffix(" EV")
-                                .step_by(0.05),
+                        .checkbox(&mut self.override_wb, "Custom White Balance Override (Bradford CAT)")
+                        .on_hover_text(
+                            "When unchecked, uses strictly the camera's As-Shot WB_RBLevels (Tag 0x000C).\n\
+                             When checked, applies a 3x3 Bradford cone-response chromatic adaptation transform\n\
+                             for the selected Kelvin temperature and Green/Magenta tint shift.",
                         )
                         .changed()
                     {
                         self.preview_dirty = true;
                     }
-                    if ui.small_button("0.0 EV").clicked() {
-                        self.ev_stops = 0.0;
-                        self.preview_dirty = true;
-                    }
+
+                    ui.add_enabled_ui(self.override_wb, |ui| {
+                        ui.add_space(4.0);
+                        ui.label("Color Temperature (Kelvin):")
+                            .on_hover_text("Target illuminant correlated color temperature along the Planckian / CIE daylight locus (2000K – 10000K).");
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut self.kelvin, 2000..=10000)
+                                    .suffix(" K")
+                                    .step_by(50.0),
+                            )
+                            .on_hover_text("Drag to adjust scene-linear White Balance Kelvin in real time on the Metal GPU.")
+                            .changed()
+                        {
+                            self.preview_dirty = true;
+                        }
+
+                        ui.horizontal(|ui| {
+                            for &(label, k, desc) in &[
+                                ("3200K", 3200u32, "Tungsten / Incandescent Studio Lighting (3200 K)"),
+                                ("4300K", 4300, "Warm White Fluorescent / Mixed Lighting (4300 K)"),
+                                ("5600K", 5600, "Direct Daylight / HMI Standard (5600 K)"),
+                                ("6500K", 6500, "Overcast Daylight / CIE D65 White Point (6500 K)"),
+                            ] {
+                                if ui.small_button(label).on_hover_text(desc).clicked() {
+                                    self.kelvin = k;
+                                    self.preview_dirty = true;
+                                }
+                            }
+                        });
+
+                        ui.add_space(6.0);
+                        ui.label("Green / Magenta Tint Shift:")
+                            .on_hover_text("Isothermal shift perpendicular to the Planckian locus in CIE 1960 UCS (u, v) space.");
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut self.tint, -50.0..=50.0)
+                                    .step_by(0.5),
+                            )
+                            .on_hover_text("Negative values shift toward Green; positive values shift toward Magenta.")
+                            .changed()
+                        {
+                            self.preview_dirty = true;
+                        }
+                    });
+
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("Scene-Linear Exposure Offset (ΔEV):").strong())
+                        .on_hover_text("Multiplies scene-linear RGB by 2^(ΔEV) prior to Nikon N-Log encoding, preserving full highlight and shadow latitude.");
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut self.ev_stops, -4.0..=4.0)
+                                    .suffix(" EV")
+                                    .step_by(0.05),
+                            )
+                            .on_hover_text("Each +1.0 EV stop doubles scene-linear light (2^1 = 2.0x); -1.0 EV halves scene-linear light (0.5x).")
+                            .changed()
+                        {
+                            self.preview_dirty = true;
+                        }
+                        if ui
+                            .small_button("0.0 EV")
+                            .on_hover_text("Reset exposure compensation to 0.0 EV.")
+                            .clicked()
+                        {
+                            self.ev_stops = 0.0;
+                            self.preview_dirty = true;
+                        }
+                    });
                 });
 
-                ui.add_space(16.0);
-                ui.heading("ProRes & FCPXML Export");
-                ui.separator();
+                ui.add_space(10.0);
 
-                ui.label("Hardware VideoToolbox Codec:");
-                ui.radio_value(
-                    &mut self.codec,
-                    ProResCodec::ProRes4444,
-                    "Apple ProRes 4444 (ap4h, 12-bit 4:4:4)",
-                );
-                ui.radio_value(
-                    &mut self.codec,
-                    ProResCodec::ProRes422HQ,
-                    "Apple ProRes 422 HQ (apch, 10-bit 4:2:2)",
-                );
+                studio_card_frame(self.dark_mode).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.heading("4. ProRes & FCPXML Export");
+                        info_badge(
+                            ui,
+                            "Stage 4 (src/encoder.rs & src/fcpxml.rs): Apple VideoToolbox hardware encoder.\n\
+                             Writes a 64-bit QuickTime (.mov) container with explicit Rec. 2020 'colr' ('nclc') atoms,\n\
+                             uncompressed 24-bit Linear PCM audio passthrough, and 'tmcd' timecode passthrough.",
+                        );
+                    });
+                    ui.separator();
 
-                ui.add_space(6.0);
-                ui.label("Output Resolution Scale:");
-                ui.horizontal(|ui| {
-                    ui.radio_value(&mut self.scale, ScaleMode::Full, "Full (1:1 Native)");
-                    ui.radio_value(&mut self.scale, ScaleMode::Half, "Half (1/2 Proxy)");
-                });
+                    ui.label(RichText::new("Hardware VideoToolbox Codec:").strong());
+                    ui.radio_value(
+                        &mut self.codec,
+                        ProResCodec::ProRes4444,
+                        "Apple ProRes 4444 (ap4h, 12-bit 4:4:4)",
+                    )
+                    .on_hover_text(
+                        "FourCC 'ap4h': Unsubsampled 4:4:4 chroma with 12-bit sample precision.\n\
+                         Recommended for cinema finishing, VFX, and maximum Nikon N-RAW color fidelity.",
+                    );
+                    ui.radio_value(
+                        &mut self.codec,
+                        ProResCodec::ProRes422HQ,
+                        "Apple ProRes 422 HQ (apch, 10-bit 4:2:2)",
+                    )
+                    .on_hover_text(
+                        "FourCC 'apch': 4:2:2 chroma subsampling at 10-bit precision.\n\
+                         Smaller file size while maintaining broadcast/editorial mastering quality.",
+                    );
 
-                ui.add_space(6.0);
-                ui.checkbox(
-                    &mut self.emit_fcpxml,
-                    "Generate Final Cut Pro FCPXML v1.11 (.fcpxml)",
-                );
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Output Spatial Resolution:").strong());
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut self.scale, ScaleMode::Full, "Full (1:1 Native)")
+                            .on_hover_text("Full sensor resolution (e.g., 8256x4644 8K or 1920x1080) using 5x5 Malvar-He-Cutler demosaicing.");
+                        ui.radio_value(&mut self.scale, ScaleMode::Half, "Half (1/2 Proxy)")
+                            .on_hover_text("2x2 superpixel box-filtered Malvar-He-Cutler downsample (e.g., 8K -> 4K) for fast editorial proxies.");
+                    });
 
-                ui.add_space(8.0);
-                ui.label("Output Directory:");
-                ui.monospace(self.output_dir.to_string_lossy());
-                if ui.button("📁 Choose Output Folder...").clicked() {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                        self.output_dir = dir;
-                    }
-                }
+                    ui.add_space(8.0);
+                    ui.checkbox(
+                        &mut self.emit_fcpxml,
+                        "Generate Final Cut Pro FCPXML v1.11 (.fcpxml)",
+                    )
+                    .on_hover_text(
+                        "Writes a companion .fcpxml v1.11 file alongside the .mov pre-populated with:\n\
+                         • Rec. 2020 N-Log color space override\n\
+                         • Camera ISO, Shutter Speed, Lens Model\n\
+                         • Applied Kelvin, Tint, and ΔEV metadata keys for Final Cut Pro.",
+                    );
 
-                ui.add_space(16.0);
-                ui.separator();
-
-                let can_run = !self.is_transcoding && !self.clips.is_empty();
-                ui.add_enabled_ui(can_run, |ui| {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Output Folder:").strong());
+                    ui.monospace(self.output_dir.to_string_lossy())
+                        .on_hover_text("Destination directory where transcoded .mov and .fcpxml files will be written.");
                     if ui
-                        .add_sized(
-                            [ui.available_width(), 36.0],
-                            egui::Button::new(
-                                RichText::new("⚡ Transcode Selected Clip to ProRes").strong(),
-                            ),
-                        )
+                        .button("📁 Choose Output Folder...")
+                        .on_hover_text("Select a destination folder using the macOS folder dialog.")
                         .clicked()
                     {
-                        self.start_transcode_job(true);
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            self.output_dir = dir;
+                        }
                     }
-                    ui.add_space(6.0);
-                    if self.clips.len() > 1
-                        && ui
+
+                    ui.add_space(12.0);
+                    ui.separator();
+
+                    let can_run = !self.is_transcoding && !self.clips.is_empty();
+                    ui.add_enabled_ui(can_run, |ui| {
+                        if ui
                             .add_sized(
-                                [ui.available_width(), 32.0],
-                                egui::Button::new(format!(
-                                    "⚡ Batch Transcode All {} Clips",
-                                    self.clips.len()
-                                )),
+                                [ui.available_width(), 38.0],
+                                egui::Button::new(
+                                    RichText::new("⚡ Transcode Selected Clip to ProRes")
+                                        .strong()
+                                        .color(Color32::from_rgb(255, 215, 0)),
+                                ),
+                            )
+                            .on_hover_text(
+                                "Run the full 4-stage pipeline (Demux -> Parallel TicoRAW Decode -> Metal GPU Debayer & N-Log -> VideoToolbox ProRes)\n\
+                                 on the currently selected clip.",
                             )
                             .clicked()
-                    {
-                        self.start_transcode_job(false);
-                    }
+                        {
+                            self.start_transcode_job(true);
+                        }
+                        if self.clips.len() > 1 {
+                            ui.add_space(6.0);
+                            if ui
+                                .add_sized(
+                                    [ui.available_width(), 32.0],
+                                    egui::Button::new(format!(
+                                        "⚡ Batch Transcode All {} Clips",
+                                        self.clips.len()
+                                    )),
+                                )
+                                .on_hover_text("Transcode every clip in the queue sequentially with the current grading & codec settings.")
+                                .clicked()
+                            {
+                                self.start_transcode_job(false);
+                            }
+                        }
+                    });
                 });
             });
 
+        // ====================================================================
         // Center Panel: Live Metal GPU Debayer & N-Log Viewport
+        // ====================================================================
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Apple Metal GPU Viewport");
+                info_badge(
+                    ui,
+                    "Live output of shaders/pipeline.metal executed on the Apple Silicon GPU.\n\
+                     Tip: Hover your cursor anywhere over the video frame below to inspect exact\n\
+                     N-Log normalized float [0.0..1.0] and 10-bit reference [0..1023] code values!",
+                );
                 ui.separator();
                 if ui
                     .selectable_label(!self.display_rec709_lut, "Nikon N-Log (Encoded Signal)")
+                    .on_hover_text(
+                        "Displays the exact flat Nikon N-Log / Rec. 2020 logarithmic signal that is encoded into the ProRes .mov file.\n\
+                         • Black (x = 0.0) maps to 10-bit code value 255 (~25% IRE)\n\
+                         • 18% Middle Gray (x = 0.18) maps to 10-bit code value 362 (~35% IRE)\n\
+                         • Cut-off threshold x_0 = 0.116597 (code value 452)",
+                    )
                     .clicked()
                 {
                     self.display_rec709_lut = false;
@@ -926,6 +1285,10 @@ impl eframe::App for Nev2ProResGuiApp {
                 }
                 if ui
                     .selectable_label(self.display_rec709_lut, "Rec. 709 Display LUT (Preview)")
+                    .on_hover_text(
+                        "Applies a non-destructive viewing LUT in the viewport (N-Log inverse -> filmic shoulder -> Gamma 2.2)\n\
+                         so you can judge contrast and white balance naturally while still exporting true N-Log to the .mov file.",
+                    )
                     .clicked()
                 {
                     self.display_rec709_lut = true;
@@ -936,20 +1299,22 @@ impl eframe::App for Nev2ProResGuiApp {
                     if self.preview_resolution.0 > 0 {
                         ui.label(
                             RichText::new(format!(
-                                "Malvar-He-Cutler 5x5 + N-Log ({}x{}): {:.2} ms on GPU",
+                                "5x5 Malvar-He-Cutler + N-Log ({}x{}): {:.2} ms",
                                 self.preview_resolution.0,
                                 self.preview_resolution.1,
                                 self.last_gpu_ms
                             ))
+                            .small()
                             .monospace(),
-                        );
+                        )
+                        .on_hover_text("Execution time of the last Metal compute shader dispatch on the GPU.");
                     }
                 });
             });
             ui.separator();
 
             if let Some(ref tex) = self.preview_texture {
-                let avail = ui.available_size() - egui::vec2(0.0, 36.0);
+                let avail = ui.available_size() - egui::vec2(0.0, 42.0);
                 let tex_size = tex.size_vec2();
                 let aspect = tex_size.x / tex_size.y.max(1.0);
                 let mut draw_w = avail.x;
@@ -959,24 +1324,60 @@ impl eframe::App for Nev2ProResGuiApp {
                     draw_w = draw_h * aspect;
                 }
 
-                ui.vertical_centered(|ui| {
-                    ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(draw_w, draw_h)));
-                });
+                Frame::none()
+                    .fill(Color32::from_rgb(10, 11, 14))
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(40, 44, 54)))
+                    .rounding(Rounding::same(6.0))
+                    .inner_margin(Margin::same(6.0))
+                    .show(ui, |ui| {
+                        ui.vertical_centered(|ui| {
+                            let img_resp = ui.add(
+                                egui::Image::new(tex)
+                                    .fit_to_exact_size(egui::vec2(draw_w, draw_h))
+                                    .sense(egui::Sense::hover()),
+                            );
+
+                            // Live Pixel Color / 10-bit N-Log Code Value Inspector on Hover
+                            if let Some(hover_pos) = img_resp.hover_pos() {
+                                let rect = img_resp.rect;
+                                let u = ((hover_pos.x - rect.left()) / rect.width().max(1.0))
+                                    .clamp(0.0, 0.9999);
+                                let v = ((hover_pos.y - rect.top()) / rect.height().max(1.0))
+                                    .clamp(0.0, 0.9999);
+                                let px = (u * (self.preview_resolution.0 as f32)) as usize;
+                                let py = (v * (self.preview_resolution.1 as f32)) as usize;
+                                let idx = py * (self.preview_resolution.0 as usize) + px;
+                                if let Some(&[r, g, b]) = self.cached_nlog_rgb.get(idx) {
+                                    let r10 = (r * 1023.0).round() as u32;
+                                    let g10 = (g * 1023.0).round() as u32;
+                                    let b10 = (b * 1023.0).round() as u32;
+                                    img_resp.on_hover_text(format!(
+                                        "Pixel ({}, {})\n\
+                                         Nikon N-Log Float : R={:.4}  G={:.4}  B={:.4}\n\
+                                         10-Bit Code Value : R={:4}    G={:4}    B={:4}  (out of 1023)",
+                                        px, py, r, g, b, r10, g10, b10
+                                    ));
+                                }
+                            }
+                        });
+                    });
 
                 // Frame Scrubber at bottom of viewport
                 if let Some(idx) = self.selected_clip_idx {
                     if let Some(clip) = self.clips.get(idx) {
                         let num_frames = clip.container.frames.len();
                         if num_frames > 1 {
+                            ui.add_space(4.0);
                             ui.horizontal(|ui| {
-                                ui.label("Frame Scrubber:");
+                                ui.label("Timeline Scrubber:")
+                                    .on_hover_text("Scrub to any frame in the .nev container; unpacks TicoRAW on CPU and debayers on Metal GPU.");
                                 if ui
                                     .add(
                                         egui::Slider::new(
                                             &mut self.preview_frame_idx,
                                             0..=(num_frames - 1),
                                         )
-                                        .text("frame"),
+                                        .text(format!("/ {} frames", num_frames)),
                                     )
                                     .changed()
                                 {
@@ -987,14 +1388,41 @@ impl eframe::App for Nev2ProResGuiApp {
                     }
                 }
             } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label(
-                        RichText::new(
-                            "No clip loaded.\nClick '🧪 Generate Sample .NEV Clip' or '📂 Open .NEV File(s)...' in the top bar.",
-                        )
-                        .size(16.0),
-                    );
-                });
+                Frame::none()
+                    .fill(if self.dark_mode {
+                        Color32::from_rgb(12, 13, 17)
+                    } else {
+                        Color32::from_rgb(235, 237, 242)
+                    })
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 47, 58)))
+                    .rounding(Rounding::same(8.0))
+                    .show(ui, |ui| {
+                        ui.centered_and_justified(|ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(ui.available_height() * 0.25);
+                                if let Some(ref logo) = self.logo_texture {
+                                    ui.add(
+                                        egui::Image::new(logo)
+                                            .fit_to_exact_size(egui::vec2(110.0, 110.0))
+                                            .rounding(Rounding::same(22.0)),
+                                    );
+                                    ui.add_space(12.0);
+                                }
+                                ui.heading(
+                                    RichText::new("Nikon N-RAW (.nev) to 12-Bit ProRes 4444 / N-Log Studio")
+                                        .size(18.0),
+                                );
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new(
+                                        "Drag & drop a Nikon Z8 / Z9 .nev file onto this window,\n\
+                                         click '📂 Open .NEV File(s)...', or click '▶ Generate Sample .NEV Clip' in the top bar.",
+                                    )
+                                    .weak(),
+                                );
+                            });
+                        });
+                    });
             }
         });
     }

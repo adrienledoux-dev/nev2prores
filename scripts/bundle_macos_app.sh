@@ -117,6 +117,7 @@ with open(dst_path, "wb") as f:
     f.write(png_bytes)
 PYEOF
     rm -f "$ASSETS_DIR/logo_raw_1024.png"
+    sips -z 256 256 "$ASSETS_DIR/logo_1024.png" --out "$ASSETS_DIR/logo_256.png" >/dev/null
 fi
 
 echo "[2/4] Building optimized Apple Silicon release binaries (nev2prores-ui & nev2prores)..."
