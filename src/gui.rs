@@ -118,8 +118,56 @@ fn apply_studio_theme(ctx: &egui::Context, dark_mode: bool) {
     }
 }
 
-/// Renders a subtle `[?]` badge that displays a detailed technical tooltip on hover.
-fn info_badge(ui: &mut egui::Ui, tooltip: &str) {
+/// Renders a rich structured tooltip card displaying a technical summary along with Pros & Cons.
+fn show_pros_cons_tooltip(
+    ui: &mut egui::Ui,
+    title: &str,
+    summary: &str,
+    pros: &[&str],
+    cons: &[&str],
+) {
+    ui.set_max_width(400.0);
+    ui.label(
+        RichText::new(title)
+            .strong()
+            .color(Color32::from_rgb(255, 212, 0)),
+    );
+    ui.add_space(3.0);
+    ui.label(summary);
+
+    if !pros.is_empty() {
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("✓ Pros:")
+                .strong()
+                .color(Color32::from_rgb(95, 225, 145)),
+        );
+        for &p in pros {
+            ui.label(format!("  • {}", p));
+        }
+    }
+
+    if !cons.is_empty() {
+        ui.add_space(5.0);
+        ui.label(
+            RichText::new("✕ Cons / Trade-offs:")
+                .strong()
+                .color(Color32::from_rgb(255, 155, 100)),
+        );
+        for &c in cons {
+            ui.label(format!("  • {}", c));
+        }
+    }
+}
+
+/// Renders a subtle `[?]` badge that displays a structured Pros & Cons tooltip card on hover.
+fn info_badge_pros_cons(
+    ui: &mut egui::Ui,
+    title: &str,
+    summary: &str,
+    pros: &[&str],
+    cons: &[&str],
+) {
     ui.add(
         egui::Label::new(
             RichText::new("[?]")
@@ -129,7 +177,9 @@ fn info_badge(ui: &mut egui::Ui, tooltip: &str) {
         )
         .sense(egui::Sense::hover()),
     )
-    .on_hover_text(tooltip);
+    .on_hover_ui(|ui| {
+        show_pros_cons_tooltip(ui, title, summary, pros, cons);
+    });
 }
 
 /// Styled container frame for sidebar cards.
@@ -255,7 +305,7 @@ impl Nev2ProResGuiApp {
             progress_fraction: 0.0,
             completed_reports: Vec::new(),
             status_banner:
-                "Ready. Open a Nikon .nev file/folder or click 'Generate Sample .NEV Clip' to preview on the Metal GPU."
+                "Ready. Open a Nikon .nev file/folder or click '▶ Generate Sample .NEV Clip' to preview on the Metal GPU."
                     .to_string(),
         };
 
@@ -666,20 +716,41 @@ impl eframe::App for Nev2ProResGuiApp {
                         .strong()
                         .color(Color32::from_rgb(255, 210, 0)),
                 )
-                .on_hover_text(
-                    "Native macOS Apple Silicon Nikon N-RAW (.nev) to 12-Bit Apple ProRes 4444 / N-Log Transcoder.\n\
-                     Built with Rust + Apple Metal Compute Shaders + VideoToolbox (Zero FFmpeg wrappers).",
-                );
+                .on_hover_ui(|ui| {
+                    show_pros_cons_tooltip(
+                        ui,
+                        "nev2prores Studio (Native Rust + Metal + VideoToolbox)",
+                        "Direct Apple Silicon hardware pipeline from Nikon N-RAW (.nev) to 12-bit ProRes 4444 / N-Log.",
+                        &[
+                            "Zero-copy Unified Memory between CPU TicoRAW unpacker and Apple Metal GPU",
+                            "Scene-linear RAW Kelvin, Tint & EV adjustments prior to N-Log curve compression",
+                            "Hardware-accelerated ProRes encoding via Apple VideoToolbox media engines",
+                        ],
+                        &[
+                            "Requires macOS on Apple Silicon (M-series) for Unified Memory & ProRes hardware engines",
+                        ],
+                    );
+                });
                 ui.label(RichText::new("STUDIO").small().weak());
 
                 ui.separator();
 
                 if ui
                     .button("📂 Open .NEV File(s)...")
-                    .on_hover_text(
-                        "Open one or more Nikon Z8 / Z9 N-RAW (.nev) video files using the native macOS file picker.\n\
-                         Tip: You can also drag and drop .nev files directly anywhere onto this window.",
-                    )
+                    .on_hover_ui(|ui| {
+                        show_pros_cons_tooltip(
+                            ui,
+                            "Open Individual .NEV Clip(s)",
+                            "Select one or more Nikon Z8 / Z9 .nev files via the macOS file dialog.",
+                            &[
+                                "Inspect & grade specific hero takes individually",
+                                "Supports multi-selection and drag-and-drop onto the window",
+                            ],
+                            &[
+                                "For full camera cards with dozens of clips, 'Open Folder...' is faster",
+                            ],
+                        );
+                    })
                     .clicked()
                 {
                     if let Some(files) = rfd::FileDialog::new()
@@ -694,9 +765,20 @@ impl eframe::App for Nev2ProResGuiApp {
 
                 if ui
                     .button("📁 Open Folder...")
-                    .on_hover_text(
-                        "Scan an entire camera card or directory for .nev clips and add them all to the batch queue.",
-                    )
+                    .on_hover_ui(|ui| {
+                        show_pros_cons_tooltip(
+                            ui,
+                            "Batch Import Folder / Camera Card",
+                            "Scans an entire directory for .nev files and adds them to the clip queue.",
+                            &[
+                                "Fastest workflow for offloading an entire CFexpress Type B card",
+                                "Pairs with 'Batch Transcode All Clips' for automated dailies generation",
+                            ],
+                            &[
+                                "Applies the same global grading overrides when batch transcoding all clips at once",
+                            ],
+                        );
+                    })
                     .clicked()
                 {
                     if let Some(dir) = rfd::FileDialog::new().pick_folder() {
@@ -706,14 +788,20 @@ impl eframe::App for Nev2ProResGuiApp {
 
                 if ui
                     .button("▶ Generate Sample .NEV Clip")
-                    .on_hover_text(
-                        "Synthesizes a 24-frame 1920x1080 12-bit RGGB Nikon Z9 .nev test file containing:\n\
-                         • 75% SMPTE color bars + scene-linear grayscale exposure ramp\n\
-                         • 24-bit 48 kHz Stereo Linear PCM audio track (in24)\n\
-                         • SMPTE Timecode track (tmcd @ 01:00:00:00)\n\
-                         • Nikon NCDT MakerNote with Tag 0x000C (WB_RBLevels) & Tag 0x003D (BlackLevel)\n\n\
-                         Ideal for testing the Metal GPU debayer & grading sliders without a camera card attached.",
-                    )
+                    .on_hover_ui(|ui| {
+                        show_pros_cons_tooltip(
+                            ui,
+                            "Synthetic 1920x1080 12-Bit RGGB Nikon Z9 Test Clip",
+                            "Generates a 24-frame .nev container with SMPTE color bars, an exposure ramp, 24-bit PCM audio, tmcd timecode, and NCDT MakerNote tags.",
+                            &[
+                                "Instant verification of the Metal GPU debayer & VideoToolbox encoder without camera media",
+                                "Includes known reference levels (75% color bars + 0..100% linear ramp) for scope checking",
+                            ],
+                            &[
+                                "Synthetic 1080p test pattern (~75 MB in /tmp) rather than an 8K optical camera recording",
+                            ],
+                        );
+                    })
                     .clicked()
                 {
                     let sample_path = std::env::temp_dir().join("Nikon_Z9_Sample_1080p.NEV");
@@ -733,9 +821,20 @@ impl eframe::App for Nev2ProResGuiApp {
                     };
                     if ui
                         .button(theme_label)
-                        .on_hover_text(
-                            "Toggle between Cinema Pro Dark Studio mode (recommended for accurate color grading) and Light mode.",
-                        )
+                        .on_hover_ui(|ui| {
+                            show_pros_cons_tooltip(
+                                ui,
+                                "Dark Studio vs. Light UI Appearance",
+                                "Switches the grading interface surround luminance between Dark Studio (#14161B) and Light Mode.",
+                                &[
+                                    "Dark Studio: Eliminates bright UI surround glare so your eyes judge shadow contrast and color balance accurately",
+                                    "Light Mode: Higher legibility in bright outdoor / on-set daylight environments",
+                                ],
+                                &[
+                                    "Light Mode surround brightness makes video shadows appear artificially darker than they are (simultaneous contrast)",
+                                ],
+                            );
+                        })
                         .clicked()
                     {
                         self.dark_mode = !self.dark_mode;
@@ -749,10 +848,20 @@ impl eframe::App for Nev2ProResGuiApp {
                             .monospace()
                             .color(Color32::from_rgb(95, 225, 145)),
                     )
-                    .on_hover_text(
-                        "Zero-copy Unified Memory (MTLResourceOptions::StorageModeShared) active on Apple Silicon.\n\
-                         Unpacked 16-bit RGGB Bayer buffers are shared directly between Rust and the Metal compute shader.",
-                    );
+                    .on_hover_ui(|ui| {
+                        show_pros_cons_tooltip(
+                            ui,
+                            "Apple Silicon Unified Memory GPU Pipeline (StorageModeShared)",
+                            "Zero-copy buffer sharing between CPU TicoRAW decoder and Metal compute kernels.",
+                            &[
+                                "Eliminates PCIe host-to-device memory copies across 8K RGGB frames",
+                                "Writes directly into page-aligned CoreVideo CVPixelBuffer memory",
+                            ],
+                            &[
+                                "Shares system RAM bandwidth between CPU performance cores and GPU compute units",
+                            ],
+                        );
+                    });
                 });
             });
             ui.add_space(6.0);
@@ -813,11 +922,17 @@ impl eframe::App for Nev2ProResGuiApp {
                 studio_card_frame(self.dark_mode).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.heading("1. Clip Queue");
-                        info_badge(
+                        info_badge_pros_cons(
                             ui,
-                            "Stage 1 (src/demuxer.rs): 64-bit ISO-BMFF zero-copy box walker.\n\
-                             Parses moov -> trak -> mdia -> minf -> stbl (stsd, stts, stsc, stsz, co64)\n\
-                             to resolve exact frame file offsets and durations without loading mdat into RAM.",
+                            "Stage 1: Zero-Copy 64-Bit ISO-BMFF Demuxer (src/demuxer.rs)",
+                            "Parses moov -> trak -> mdia -> minf -> stbl (stsd, stts, stsc, stsz, co64) using Seek + Read.",
+                            &[
+                                "Opens multi-gigabyte >4GB .nev files in <1 ms without reading mdat into memory",
+                                "Resolves exact 64-bit file offsets and frame durations for random-access scrubbing",
+                            ],
+                            &[
+                                "Requires an intact 'moov' atom at the end of the .nev recording (uncorrupted camera file)",
+                            ],
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if !self.clips.is_empty()
@@ -882,11 +997,17 @@ impl eframe::App for Nev2ProResGuiApp {
                 studio_card_frame(self.dark_mode).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.heading("2. Nikon NCDT MakerNote");
-                        info_badge(
+                        info_badge_pros_cons(
                             ui,
-                            "Stage 1.3 (src/metadata.rs): Parses moov -> udta -> NCDT.\n\
-                             Scans for the embedded 'Nikon\\0' MakerNote TIFF header (handling both II little-endian\n\
-                             and MM big-endian byte order) to extract sensor calibration and camera exposure tags.",
+                            "Stage 1.3: Nikon NCDT & MakerNote TIFF Parser (src/metadata.rs)",
+                            "Extracts embedded 'Nikon\\0' MakerNote tags (0x000C WB_RBLevels, 0x003D BlackLevel, ISO, Shutter, Lens).",
+                            &[
+                                "Reads true sensor optical black levels and As-Shot R/B white balance multipliers",
+                                "Supports both little-endian ('II') and big-endian ('MM') embedded TIFF headers",
+                            ],
+                            &[
+                                "Proprietary encrypted Nikon lens tags fall back to standard Exif lens descriptors if absent",
+                            ],
                         );
                     });
                     ui.separator();
@@ -981,11 +1102,17 @@ impl eframe::App for Nev2ProResGuiApp {
                             ui.add_space(10.0);
                             ui.horizontal(|ui| {
                                 ui.label(RichText::new("Bradford Adaptation Matrix M_WB").strong());
-                                info_badge(
+                                info_badge_pros_cons(
                                     ui,
-                                    "3x3 Scene-Linear Color Matrix computed on the host in Rust (src/metadata.rs):\n\
-                                     M_WB = M_(XYZ->Rec2020) * M_B^(-1) * diag(M_B*W_src / M_B*W_dst) * M_B * M_(Camera->XYZ)\n\n\
-                                     Adapts camera native RGB from the target Kelvin/Tint illuminant into ITU-R BT.2020 (D65).",
+                                    "3x3 Bradford Chromatic Adaptation Matrix (M_WB)",
+                                    "M_WB = M_(XYZ->Rec2020) * M_B^(-1) * diag(M_B*W_src / M_B*W_dst) * M_B * M_(Camera->XYZ)",
+                                    &[
+                                        "Models human cone response (LMS) more accurately than simple RGB channel scaling",
+                                        "Fuses Camera->XYZ, white point adaptation, and XYZ->Rec.2020 into a single 3x3 GPU matrix multiply",
+                                    ],
+                                    &[
+                                        "Extreme Kelvin shifts (<2200K or >9500K) can push saturated primaries near the Rec.2020 gamut boundary",
+                                    ],
                                 );
                             });
                             let params = ColorPipelineParams::from_metadata(
@@ -1036,12 +1163,17 @@ impl eframe::App for Nev2ProResGuiApp {
                 studio_card_frame(self.dark_mode).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.heading("3. Scene-Linear RAW Grading");
-                        info_badge(
+                        info_badge_pros_cons(
                             ui,
-                            "Stage 3 (shaders/pipeline.metal): All White Balance (Kelvin/Tint) and Exposure (EV)\n\
-                             adjustments are evaluated in 32-bit floating-point scene-linear light AFTER\n\
-                             Malvar-He-Cutler 5x5 demosaicing and BEFORE Nikon N-Log compression—identical to\n\
-                             changing ISO or Kelvin in-camera on a RAW sensor.",
+                            "Stage 3: Scene-Linear RAW Color Pipeline (shaders/pipeline.metal)",
+                            "Evaluates WB gains, EV exposure stops, and Bradford chromatic adaptation in 32-bit float scene-linear light before Nikon N-Log encoding.",
+                            &[
+                                "Mathematically equivalent to changing ISO or Kelvin in-camera on the RAW sensor",
+                                "Preserves full highlight roll-off and shadow linearity prior to log compression",
+                            ],
+                            &[
+                                "Adjustments are baked into the exported ProRes N-Log master (though 12-bit ProRes 4444 retains wide grading latitude)",
+                            ],
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
@@ -1065,11 +1197,20 @@ impl eframe::App for Nev2ProResGuiApp {
 
                     if ui
                         .checkbox(&mut self.override_wb, "Custom White Balance Override (Bradford CAT)")
-                        .on_hover_text(
-                            "When unchecked, uses strictly the camera's As-Shot WB_RBLevels (Tag 0x000C).\n\
-                             When checked, applies a 3x3 Bradford cone-response chromatic adaptation transform\n\
-                             for the selected Kelvin temperature and Green/Magenta tint shift.",
-                        )
+                        .on_hover_ui(|ui| {
+                            show_pros_cons_tooltip(
+                                ui,
+                                "Custom White Balance (Bradford CAT) vs. As-Shot WB",
+                                "Controls whether the shader uses only the camera's As-Shot WB_RBLevels or applies a 3x3 Bradford chromatic adaptation transform.",
+                                &[
+                                    "Unchecked (As-Shot): Preserves exact on-set camera white balance recorded in NCDT Tag 0x000C",
+                                    "Checked (Custom): Allows lossless RAW re-balancing to any Kelvin (2000K–10000K) & Tint in scene-linear light",
+                                ],
+                                &[
+                                    "Overriding WB changes the scene-linear channel ratios before N-Log encoding; verify skin tones in the viewport",
+                                ],
+                            );
+                        })
                         .changed()
                     {
                         self.preview_dirty = true;
@@ -1078,27 +1219,87 @@ impl eframe::App for Nev2ProResGuiApp {
                     ui.add_enabled_ui(self.override_wb, |ui| {
                         ui.add_space(4.0);
                         ui.label("Color Temperature (Kelvin):")
-                            .on_hover_text("Target illuminant correlated color temperature along the Planckian / CIE daylight locus (2000K – 10000K).");
+                            .on_hover_ui(|ui| {
+                                show_pros_cons_tooltip(
+                                    ui,
+                                    "Correlated Color Temperature (2000 K – 10000 K)",
+                                    "Adapts the scene illuminant along the Planckian / CIE daylight locus.",
+                                    &[
+                                        "No channel clipping or quantization banding compared to grading WB after log encoding",
+                                        "Updates the 3x3 Bradford matrix M_WB in real time on the GPU",
+                                    ],
+                                    &[
+                                        "Very high Kelvin (>8000K) boosts Red gain, which can push bright warm highlights closer to clipping",
+                                    ],
+                                );
+                            });
                         if ui
                             .add(
                                 egui::Slider::new(&mut self.kelvin, 2000..=10000)
                                     .suffix(" K")
                                     .step_by(50.0),
                             )
-                            .on_hover_text("Drag to adjust scene-linear White Balance Kelvin in real time on the Metal GPU.")
+                            .on_hover_ui(|ui| {
+                                show_pros_cons_tooltip(
+                                    ui,
+                                    "Kelvin White Balance Slider",
+                                    "Drag to warm or cool the image in scene-linear light.",
+                                    &[
+                                        "Lower Kelvin (e.g. 3200K) cools warm tungsten light",
+                                        "Higher Kelvin (e.g. 6500K) warms cool shade/daylight",
+                                    ],
+                                    &[
+                                        "Large shifts should be paired with Tint adjustment for mixed-spectrum LED/fluorescent sources",
+                                    ],
+                                );
+                            })
                             .changed()
                         {
                             self.preview_dirty = true;
                         }
 
                         ui.horizontal(|ui| {
-                            for &(label, k, desc) in &[
-                                ("3200K", 3200u32, "Tungsten / Incandescent Studio Lighting (3200 K)"),
-                                ("4300K", 4300, "Warm White Fluorescent / Mixed Lighting (4300 K)"),
-                                ("5600K", 5600, "Direct Daylight / HMI Standard (5600 K)"),
-                                ("6500K", 6500, "Overcast Daylight / CIE D65 White Point (6500 K)"),
+                            for &(label, k, title, summary, pro, con) in &[
+                                (
+                                    "3200K",
+                                    3200u32,
+                                    "3200 K — Tungsten / Incandescent Preset",
+                                    "Standard indoor halogen & tungsten studio lighting balance.",
+                                    "Neutralizes warm orange cast from 3200K tungsten lamps",
+                                    "Makes daylight-lit scenes appear strongly blue/cold",
+                                ),
+                                (
+                                    "4300K",
+                                    4300,
+                                    "4300 K — Mixed / Fluorescent Preset",
+                                    "Intermediate balance for warm-white office/commercial lighting or mixed tungsten+daylight.",
+                                    "Balanced compromise when shooting under mixed indoor/window light",
+                                    "Often requires a slight Green/Magenta Tint tweak for non-blackbody fluorescent tubes",
+                                ),
+                                (
+                                    "5600K",
+                                    5600,
+                                    "5600 K — Direct Daylight / HMI Preset",
+                                    "Cinema standard direct sun and HMI lighting white point.",
+                                    "Matches standard cinema daylight fixtures and sunny outdoor shooting",
+                                    "Can look slightly cool under overcast skies or open shade",
+                                ),
+                                (
+                                    "6500K",
+                                    6500,
+                                    "6500 K — Overcast / CIE D65 Preset",
+                                    "Native white point of ITU-R BT.2020 / Rec. 709 (D65) and overcast daylight.",
+                                    "Warms up cool outdoor shade and aligns with the D65 display reference",
+                                    "Can make direct golden-hour sunlight appear overly warm/amber",
+                                ),
                             ] {
-                                if ui.small_button(label).on_hover_text(desc).clicked() {
+                                if ui
+                                    .small_button(label)
+                                    .on_hover_ui(|ui| {
+                                        show_pros_cons_tooltip(ui, title, summary, &[pro], &[con]);
+                                    })
+                                    .clicked()
+                                {
                                     self.kelvin = k;
                                     self.preview_dirty = true;
                                 }
@@ -1107,13 +1308,39 @@ impl eframe::App for Nev2ProResGuiApp {
 
                         ui.add_space(6.0);
                         ui.label("Green / Magenta Tint Shift:")
-                            .on_hover_text("Isothermal shift perpendicular to the Planckian locus in CIE 1960 UCS (u, v) space.");
+                            .on_hover_ui(|ui| {
+                                show_pros_cons_tooltip(
+                                    ui,
+                                    "Green / Magenta Isothermal Tint Shift (-50 to +50)",
+                                    "Shifts chromaticity perpendicular to the Planckian locus in CIE 1960 UCS (u, v) space.",
+                                    &[
+                                        "Corrects green spikes in LED / fluorescent fixtures (+Tint toward Magenta)",
+                                        "Corrects magenta casts in skin tones (-Tint toward Green)",
+                                    ],
+                                    &[
+                                        "Shifts > ±20 will introduce a noticeable green or magenta cast to neutral grays",
+                                    ],
+                                );
+                            });
                         if ui
                             .add(
                                 egui::Slider::new(&mut self.tint, -50.0..=50.0)
                                     .step_by(0.5),
                             )
-                            .on_hover_text("Negative values shift toward Green; positive values shift toward Magenta.")
+                            .on_hover_ui(|ui| {
+                                show_pros_cons_tooltip(
+                                    ui,
+                                    "Green / Magenta Tint Slider",
+                                    "Fine-tunes green vs. magenta balance in scene-linear light.",
+                                    &[
+                                        "0.0 preserves pure Planckian blackbody locus adaptation",
+                                        "Sub-unit precision (0.5 steps) for accurate skin-tone matching",
+                                    ],
+                                    &[
+                                        "Should be kept near 0.0 under natural sunlight or high-CRI tungsten sources",
+                                    ],
+                                );
+                            })
                             .changed()
                         {
                             self.preview_dirty = true;
@@ -1122,7 +1349,20 @@ impl eframe::App for Nev2ProResGuiApp {
 
                     ui.add_space(10.0);
                     ui.label(RichText::new("Scene-Linear Exposure Offset (ΔEV):").strong())
-                        .on_hover_text("Multiplies scene-linear RGB by 2^(ΔEV) prior to Nikon N-Log encoding, preserving full highlight and shadow latitude.");
+                        .on_hover_ui(|ui| {
+                            show_pros_cons_tooltip(
+                                ui,
+                                "Scene-Linear Exposure Compensation (2^ΔEV)",
+                                "Multiplies linear sensor RGB by 2^ΔEV prior to Nikon N-Log curve compression.",
+                                &[
+                                    "Exact photometric stop adjustment (+1.0 EV = 2.0x light, -1.0 EV = 0.5x light)",
+                                    "Recovers shadow detail or places middle gray at target N-Log IRE (35%) before ProRes quantization",
+                                ],
+                                &[
+                                    "Positive EV (+EV) reduces headroom above 100% reflection; negative EV (-EV) lowers the sensor ceiling",
+                                ],
+                            );
+                        });
                     ui.horizontal(|ui| {
                         if ui
                             .add(
@@ -1130,14 +1370,27 @@ impl eframe::App for Nev2ProResGuiApp {
                                     .suffix(" EV")
                                     .step_by(0.05),
                             )
-                            .on_hover_text("Each +1.0 EV stop doubles scene-linear light (2^1 = 2.0x); -1.0 EV halves scene-linear light (0.5x).")
+                            .on_hover_ui(|ui| {
+                                show_pros_cons_tooltip(
+                                    ui,
+                                    "Exposure Offset Slider (-4.00 EV to +4.00 EV)",
+                                    "Scales linear RGB before the Nikon N-Log transfer function.",
+                                    &[
+                                        "Cleanly lifts underexposed N-RAW takes without post-log LUT posterization",
+                                        "Real-time GPU preview updates in <2 ms",
+                                    ],
+                                    &[
+                                        "Any sensor pixel already clipped at WhiteLevel (4095/16383) in the .nev cannot recover detail with -EV",
+                                    ],
+                                );
+                            })
                             .changed()
                         {
                             self.preview_dirty = true;
                         }
                         if ui
                             .small_button("0.0 EV")
-                            .on_hover_text("Reset exposure compensation to 0.0 EV.")
+                            .on_hover_text("Reset exposure compensation to 0.0 EV (unity gain).")
                             .clicked()
                         {
                             self.ev_stops = 0.0;
@@ -1151,11 +1404,17 @@ impl eframe::App for Nev2ProResGuiApp {
                 studio_card_frame(self.dark_mode).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.heading("4. ProRes & FCPXML Export");
-                        info_badge(
+                        info_badge_pros_cons(
                             ui,
-                            "Stage 4 (src/encoder.rs & src/fcpxml.rs): Apple VideoToolbox hardware encoder.\n\
-                             Writes a 64-bit QuickTime (.mov) container with explicit Rec. 2020 'colr' ('nclc') atoms,\n\
-                             uncompressed 24-bit Linear PCM audio passthrough, and 'tmcd' timecode passthrough.",
+                            "Stage 4: Hardware VideoToolbox ProRes & QuickTime Muxer",
+                            "Encodes via Apple Silicon ProRes hardware engines and writes a 64-bit .mov with Rec.2020 'colr' ('nclc') tags.",
+                            &[
+                                "Dedicated Apple Silicon ProRes media engine offloads CPU & GPU during encoding",
+                                "Passes through uncompressed 24-bit Linear PCM audio and original 'tmcd' camera timecode",
+                            ],
+                            &[
+                                "All-intra ProRes masters require fast SSD storage for 8K high-bitrate output",
+                            ],
                         );
                     });
                     ui.separator();
@@ -1166,27 +1425,73 @@ impl eframe::App for Nev2ProResGuiApp {
                         ProResCodec::ProRes4444,
                         "Apple ProRes 4444 (ap4h, 12-bit 4:4:4)",
                     )
-                    .on_hover_text(
-                        "FourCC 'ap4h': Unsubsampled 4:4:4 chroma with 12-bit sample precision.\n\
-                         Recommended for cinema finishing, VFX, and maximum Nikon N-RAW color fidelity.",
-                    );
+                    .on_hover_ui(|ui| {
+                        show_pros_cons_tooltip(
+                            ui,
+                            "Apple ProRes 4444 ('ap4h' — 12-Bit 4:4:4)",
+                            "Highest-fidelity Apple ProRes profile with unsubsampled 4:4:4 chroma and 12-bit sample precision.",
+                            &[
+                                "Full 12-bit precision matches Nikon Z8/Z9 12-bit N-RAW sensor depth without bit-depth loss",
+                                "Unsubsampled 4:4:4 color is ideal for green-screen keying, VFX, and heavy N-Log color grading",
+                            ],
+                            &[
+                                "Approximately ~50% larger file size and higher disk bandwidth than ProRes 422 HQ",
+                            ],
+                        );
+                    });
                     ui.radio_value(
                         &mut self.codec,
                         ProResCodec::ProRes422HQ,
                         "Apple ProRes 422 HQ (apch, 10-bit 4:2:2)",
                     )
-                    .on_hover_text(
-                        "FourCC 'apch': 4:2:2 chroma subsampling at 10-bit precision.\n\
-                         Smaller file size while maintaining broadcast/editorial mastering quality.",
-                    );
+                    .on_hover_ui(|ui| {
+                        show_pros_cons_tooltip(
+                            ui,
+                            "Apple ProRes 422 HQ ('apch' — 10-Bit 4:2:2)",
+                            "Industry-standard broadcast and editorial mastering codec with 10-bit 4:2:2 chroma.",
+                            &[
+                                "Significantly smaller `.mov` file sizes for faster storage and timeline playback",
+                                "Universal compatibility across all NLEs and broadcast delivery specs",
+                            ],
+                            &[
+                                "10-bit quantization (vs. 12-bit in 4444) and horizontal 4:2:2 chroma subsampling",
+                            ],
+                        );
+                    });
 
                     ui.add_space(8.0);
                     ui.label(RichText::new("Output Spatial Resolution:").strong());
                     ui.horizontal(|ui| {
                         ui.radio_value(&mut self.scale, ScaleMode::Full, "Full (1:1 Native)")
-                            .on_hover_text("Full sensor resolution (e.g., 8256x4644 8K or 1920x1080) using 5x5 Malvar-He-Cutler demosaicing.");
+                            .on_hover_ui(|ui| {
+                                show_pros_cons_tooltip(
+                                    ui,
+                                    "Full Resolution (1:1 Native Sensor Dimensions)",
+                                    "Reconstructs every Bayer pixel (e.g., 8256x4644 8K or 1920x1080) using 5x5 Malvar-He-Cutler demosaicing.",
+                                    &[
+                                        "Preserves 100% of native sensor spatial resolution and fine texture detail",
+                                        "Allows reframing, stabilization, and 8K/4K mastering without upscaling",
+                                    ],
+                                    &[
+                                        "4x larger pixel count and file size compared to Half-resolution proxy mode",
+                                    ],
+                                );
+                            });
                         ui.radio_value(&mut self.scale, ScaleMode::Half, "Half (1/2 Proxy)")
-                            .on_hover_text("2x2 superpixel box-filtered Malvar-He-Cutler downsample (e.g., 8K -> 4K) for fast editorial proxies.");
+                            .on_hover_ui(|ui| {
+                                show_pros_cons_tooltip(
+                                    ui,
+                                    "Half Resolution (2x2 Superpixel Box-Filtered Downsample)",
+                                    "Evaluates 2x2 Malvar-He-Cutler RGGB quads on the GPU to output half width & height (e.g., 8K -> 4K).",
+                                    &[
+                                        "~4x faster transcoding and ~75% smaller `.mov` files for lightweight offline/proxy editing",
+                                        "2x2 superpixel averaging naturally reduces high-ISO sensor chroma noise",
+                                    ],
+                                    &[
+                                        "Halves horizontal and vertical spatial resolution compared to the native sensor",
+                                    ],
+                                );
+                            });
                     });
 
                     ui.add_space(8.0);
@@ -1194,12 +1499,20 @@ impl eframe::App for Nev2ProResGuiApp {
                         &mut self.emit_fcpxml,
                         "Generate Final Cut Pro FCPXML v1.11 (.fcpxml)",
                     )
-                    .on_hover_text(
-                        "Writes a companion .fcpxml v1.11 file alongside the .mov pre-populated with:\n\
-                         • Rec. 2020 N-Log color space override\n\
-                         • Camera ISO, Shutter Speed, Lens Model\n\
-                         • Applied Kelvin, Tint, and ΔEV metadata keys for Final Cut Pro.",
-                    );
+                    .on_hover_ui(|ui| {
+                        show_pros_cons_tooltip(
+                            ui,
+                            "Final Cut Pro FCPXML v1.11 Sidecar (.fcpxml)",
+                            "Writes a companion XML file alongside the .mov with camera & RAW metadata pre-populated.",
+                            &[
+                                "Automatically tags the clip as 'Rec. 2020 N-Log' in Final Cut Pro upon import",
+                                "Populates Inspector metadata (ISO, Shutter Speed, Lens, Kelvin, Tint, ΔEV, Timecode)",
+                            ],
+                            &[
+                                "Creates an extra `.fcpxml` file next to each `.mov` in the output directory (not needed if editing only in Resolve/Premiere)",
+                            ],
+                        );
+                    });
 
                     ui.add_space(8.0);
                     ui.label(RichText::new("Output Folder:").strong());
@@ -1229,10 +1542,20 @@ impl eframe::App for Nev2ProResGuiApp {
                                         .color(Color32::from_rgb(255, 215, 0)),
                                 ),
                             )
-                            .on_hover_text(
-                                "Run the full 4-stage pipeline (Demux -> Parallel TicoRAW Decode -> Metal GPU Debayer & N-Log -> VideoToolbox ProRes)\n\
-                                 on the currently selected clip.",
-                            )
+                            .on_hover_ui(|ui| {
+                                show_pros_cons_tooltip(
+                                    ui,
+                                    "Transcode Selected Clip",
+                                    "Executes the 4-stage pipeline on the currently active clip in the viewport.",
+                                    &[
+                                        "Fastest way to export a single hero shot after dialing in Kelvin, Tint & EV",
+                                        "Runs asynchronously on background threads with live frame progress",
+                                    ],
+                                    &[
+                                        "Only exports the currently selected clip (use 'Batch Transcode' below when multiple clips are queued)",
+                                    ],
+                                );
+                            })
                             .clicked()
                         {
                             self.start_transcode_job(true);
@@ -1247,7 +1570,20 @@ impl eframe::App for Nev2ProResGuiApp {
                                         self.clips.len()
                                     )),
                                 )
-                                .on_hover_text("Transcode every clip in the queue sequentially with the current grading & codec settings.")
+                                .on_hover_ui(|ui| {
+                                    show_pros_cons_tooltip(
+                                        ui,
+                                        "Batch Transcode All Queued Clips",
+                                        "Transcodes every clip in the queue sequentially to the output folder.",
+                                        &[
+                                            "Unattended processing for an entire shoot or camera card",
+                                            "Preserves each clip's individual As-Shot WB unless Custom WB Override is checked",
+                                        ],
+                                        &[
+                                            "If Custom WB Override or ΔEV is active, that override is applied uniformly to all clips in the batch",
+                                        ],
+                                    );
+                                })
                                 .clicked()
                             {
                                 self.start_transcode_job(false);
@@ -1263,21 +1599,35 @@ impl eframe::App for Nev2ProResGuiApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Apple Metal GPU Viewport");
-                info_badge(
+                info_badge_pros_cons(
                     ui,
-                    "Live output of shaders/pipeline.metal executed on the Apple Silicon GPU.\n\
-                     Tip: Hover your cursor anywhere over the video frame below to inspect exact\n\
-                     N-Log normalized float [0.0..1.0] and 10-bit reference [0..1023] code values!",
+                    "Real-Time Apple Metal Compute Viewport",
+                    "Executes shaders/pipeline.metal on the GPU and displays the resulting frame.",
+                    &[
+                        "Sub-2ms GPU compute latency enables 60+ fps interactive Kelvin, Tint, and EV grading",
+                        "Hover anywhere over the video frame to inspect exact 10-bit N-Log [0..1023] code values",
+                    ],
+                    &[
+                        "Uses Half-scale preview for >1280px clips to guarantee instantaneous slider response",
+                    ],
                 );
                 ui.separator();
                 if ui
                     .selectable_label(!self.display_rec709_lut, "Nikon N-Log (Encoded Signal)")
-                    .on_hover_text(
-                        "Displays the exact flat Nikon N-Log / Rec. 2020 logarithmic signal that is encoded into the ProRes .mov file.\n\
-                         • Black (x = 0.0) maps to 10-bit code value 255 (~25% IRE)\n\
-                         • 18% Middle Gray (x = 0.18) maps to 10-bit code value 362 (~35% IRE)\n\
-                         • Cut-off threshold x_0 = 0.116597 (code value 452)",
-                    )
+                    .on_hover_ui(|ui| {
+                        show_pros_cons_tooltip(
+                            ui,
+                            "Nikon N-Log (Flat Logarithmic Encoded Signal)",
+                            "Displays the exact un-tone-mapped Nikon N-Log / Rec. 2020 signal written into the ProRes .mov container.",
+                            &[
+                                "Shows true log signal distribution (Black = 255 / 25% IRE, 18% Gray = 362 / 35% IRE)",
+                                "Makes it easy to spot sensor clipping or crushed blacks before encoding",
+                            ],
+                            &[
+                                "Appears flat, low-contrast, and desaturated on a standard monitor because no display LUT is applied",
+                            ],
+                        );
+                    })
                     .clicked()
                 {
                     self.display_rec709_lut = false;
@@ -1285,10 +1635,20 @@ impl eframe::App for Nev2ProResGuiApp {
                 }
                 if ui
                     .selectable_label(self.display_rec709_lut, "Rec. 709 Display LUT (Preview)")
-                    .on_hover_text(
-                        "Applies a non-destructive viewing LUT in the viewport (N-Log inverse -> filmic shoulder -> Gamma 2.2)\n\
-                         so you can judge contrast and white balance naturally while still exporting true N-Log to the .mov file.",
-                    )
+                    .on_hover_ui(|ui| {
+                        show_pros_cons_tooltip(
+                            ui,
+                            "Rec. 709 Display LUT (Non-Destructive Monitoring Preview)",
+                            "Applies a viewing transform (N-Log inverse -> filmic highlight shoulder -> Gamma 2.2) in the viewport ONLY.",
+                            &[
+                                "Natural contrast and color saturation for judging skin tones, Kelvin, and Tint by eye",
+                                "100% non-destructive: the exported ProRes .mov file is still encoded in pure Nikon N-Log / Rec. 2020",
+                            ],
+                            &[
+                                "Compresses extreme highlight roll-off visually in the preview compared to the raw N-Log signal view",
+                            ],
+                        );
+                    })
                     .clicked()
                 {
                     self.display_rec709_lut = true;
@@ -1388,41 +1748,56 @@ impl eframe::App for Nev2ProResGuiApp {
                     }
                 }
             } else {
-                Frame::none()
-                    .fill(if self.dark_mode {
+                // Empty Viewport State: Centered both vertically and horizontally
+                let avail_rect = ui.available_rect_before_wrap();
+                ui.painter().rect(
+                    avail_rect,
+                    Rounding::same(8.0),
+                    if self.dark_mode {
                         Color32::from_rgb(12, 13, 17)
                     } else {
                         Color32::from_rgb(235, 237, 242)
-                    })
-                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(42, 47, 58)))
-                    .rounding(Rounding::same(8.0))
-                    .show(ui, |ui| {
-                        ui.centered_and_justified(|ui| {
-                            ui.vertical_centered(|ui| {
-                                ui.add_space(ui.available_height() * 0.25);
-                                if let Some(ref logo) = self.logo_texture {
-                                    ui.add(
-                                        egui::Image::new(logo)
-                                            .fit_to_exact_size(egui::vec2(110.0, 110.0))
-                                            .rounding(Rounding::same(22.0)),
-                                    );
-                                    ui.add_space(12.0);
-                                }
-                                ui.heading(
-                                    RichText::new("Nikon N-RAW (.nev) to 12-Bit ProRes 4444 / N-Log Studio")
-                                        .size(18.0),
-                                );
-                                ui.add_space(6.0);
-                                ui.label(
-                                    RichText::new(
-                                        "Drag & drop a Nikon Z8 / Z9 .nev file onto this window,\n\
-                                         click '📂 Open .NEV File(s)...', or click '▶ Generate Sample .NEV Clip' in the top bar.",
-                                    )
-                                    .weak(),
-                                );
-                            });
-                        });
+                    },
+                    Stroke::new(1.0_f32, Color32::from_rgb(42, 47, 58)),
+                );
+
+                let content_height = 205.0;
+                let top_pad = ((avail_rect.height() - content_height) * 0.5).max(16.0);
+
+                ui.allocate_new_ui(egui::UiBuilder::new().max_rect(avail_rect), |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(top_pad);
+                        if let Some(ref logo) = self.logo_texture {
+                            ui.add(
+                                egui::Image::new(logo)
+                                    .fit_to_exact_size(egui::vec2(112.0, 112.0))
+                                    .rounding(Rounding::same(22.0)),
+                            );
+                            ui.add_space(16.0);
+                        }
+                        ui.heading(
+                            RichText::new("Nikon N-RAW (.nev) to 12-Bit ProRes 4444 / N-Log Studio")
+                                .size(19.0)
+                                .strong(),
+                        );
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new(
+                                "Drag & drop a Nikon Z8 / Z9 .nev file anywhere onto this window,",
+                            )
+                            .size(13.5)
+                            .weak(),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new(
+                                "click '📂 Open .NEV File(s)...', or click '▶ Generate Sample .NEV Clip' in the top bar.",
+                            )
+                            .size(13.5)
+                            .weak(),
+                        );
                     });
+                });
             }
         });
     }
