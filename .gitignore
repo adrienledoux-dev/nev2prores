@@ -1,0 +1,9 @@
+/target/
+/dist/dmg_staging/
+/dist/AppIcon.iconset/
+.DS_Store
+*.mov
+*.MOV
+*.fcpxml
+*.nev
+*.NEV

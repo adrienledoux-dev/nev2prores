@@ -1,0 +1,36 @@
+[package]
+name = "nev2prores"
+version = "0.1.0"
+edition = "2021"
+description = "Native macOS Nikon N-RAW (.nev) to 12-Bit ProRes 4444 / N-Log Transcoder"
+authors = ["Systems & Media Pipeline Engineering"]
+
+[[bin]]
+name = "nev2prores"
+path = "src/main.rs"
+
+[[bin]]
+name = "nev2prores-ui"
+path = "src/bin/nev2prores_ui.rs"
+
+[lib]
+name = "nev2prores"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0"
+bytemuck = { version = "1.18", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
+core-foundation-sys = "0.8"
+crossbeam-channel = "0.5"
+eframe = "0.29"
+half = { version = "2.4", features = ["bytemuck"] }
+libc = "0.2"
+metal = "0.29"
+objc = "0.2"
+rayon = "1.10"
+rfd = "0.15"
+thiserror = "1.0"
+
+[dev-dependencies]
+tempfile = "3.12"
