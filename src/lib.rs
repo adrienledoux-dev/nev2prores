@@ -17,8 +17,11 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 
 use crate::decoder::{BoundedDecodePipeline, NativeTicoRawDecoder};
-use crate::demuxer::{build_synthetic_nev, demux_nev_file, NevDemuxedContainer};
-use crate::encoder::{ProResCodec, QuickTimeMovWriter, VideoToolboxProResEncoder};
+use crate::demuxer::{build_synthetic_nev_with_bit_depth, demux_nev_file, NevDemuxedContainer};
+use crate::encoder::{
+    encode_uncompressed_b64a_frame_with_metal, ProResCodec, QuickTimeMovWriter,
+    VideoToolboxProResEncoder,
+};
 use crate::fcpxml::write_fcpxml_sidecar;
 use crate::metal_pipeline::{ColorPipelineParams, MetalColorPipeline, ScaleMode};
 
@@ -239,10 +242,15 @@ where
         cancel_flag.clone(),
     );
 
-    // Stage 4: Hardware VideoToolbox ProRes Session + 64-Bit QuickTime `.mov` Writer
-    let mut vt_encoder =
-        VideoToolboxProResEncoder::new(out_width, out_height, container.timescale, opts.codec)
-            .context("Failed to initialize Apple VideoToolbox ProRes hardware session")?;
+    // Stage 4: Hardware VideoToolbox ProRes Session (if ProRes) + 64-Bit QuickTime `.mov` Writer
+    let mut vt_encoder = if opts.codec.is_hardware_prores() {
+        Some(
+            VideoToolboxProResEncoder::new(out_width, out_height, container.timescale, opts.codec)
+                .context("Failed to initialize Apple VideoToolbox ProRes hardware session")?,
+        )
+    } else {
+        None
+    };
 
     let mut mov_writer = QuickTimeMovWriter::create(
         &output_mov_path,
@@ -258,7 +266,7 @@ where
         )
     })?;
 
-    // Stream frames: CPU TicoRAW decode -> Metal GPU Debayer & N-Log -> VideoToolbox ProRes -> .mov
+    // Stream frames: CPU TicoRAW decode -> Metal GPU Debayer & N-Log -> VideoToolbox ProRes / 16-bit b64a -> .mov
     let mut frames_transcoded = 0usize;
     for decoded_res in decode_pipeline.receiver().iter() {
         if cancel_flag
@@ -281,33 +289,53 @@ where
             }
         };
 
-        let packets = match vt_encoder.encode_bayer_frame_with_metal(
-            gpu,
-            &decoded_frame.bayer_rggb,
-            &params,
-            decoded_frame.pts,
-            decoded_frame.duration,
-        ) {
-            Ok(pkts) => pkts,
-            Err(e) => {
-                drop(mov_writer);
-                drop(vt_encoder);
-                let _ = std::fs::remove_file(&output_mov_path);
-                return Err(e).context("Failed to encode frame via Metal + VideoToolbox");
+        if let Some(ref mut vt) = vt_encoder {
+            let packets = match vt.encode_bayer_frame_with_metal(
+                gpu,
+                &decoded_frame.bayer_rggb,
+                &params,
+                decoded_frame.pts,
+                decoded_frame.duration,
+            ) {
+                Ok(pkts) => pkts,
+                Err(e) => {
+                    drop(mov_writer);
+                    drop(vt_encoder);
+                    let _ = std::fs::remove_file(&output_mov_path);
+                    return Err(e).context("Failed to encode frame via Metal + VideoToolbox");
+                }
+            };
+            for pkt in &packets {
+                mov_writer.write_video_packet(pkt)?;
             }
-        };
-
-        for pkt in &packets {
-            mov_writer.write_video_packet(pkt)?;
+        } else {
+            let pkt = match encode_uncompressed_b64a_frame_with_metal(
+                gpu,
+                &decoded_frame.bayer_rggb,
+                &params,
+                decoded_frame.pts,
+                decoded_frame.duration,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    drop(mov_writer);
+                    let _ = std::fs::remove_file(&output_mov_path);
+                    return Err(e).context("Failed to encode 16-bit b64a frame via Metal");
+                }
+            };
+            mov_writer.write_video_packet(&pkt)?;
         }
+
         frames_transcoded += 1;
         on_progress(frames_transcoded, total_frames);
     }
 
-    // Flush remaining frames from VideoToolbox
-    let trailing_packets = vt_encoder.finish()?;
-    for pkt in &trailing_packets {
-        mov_writer.write_video_packet(pkt)?;
+    // Flush remaining frames from VideoToolbox if active
+    if let Some(mut vt) = vt_encoder {
+        let trailing_packets = vt.finish()?;
+        for pkt in &trailing_packets {
+            mov_writer.write_video_packet(pkt)?;
+        }
     }
 
     // Passthrough uncompressed 24-bit Linear PCM audio track & camera timecode (`tmcd`)
@@ -361,11 +389,19 @@ where
 /// Generates a synthetic 1920x1080 12-bit RGGB Nikon Z9 `.nev` test file with SMPTE color bars,
 /// a scene-linear exposure ramp, 24-bit 48kHz stereo PCM audio, `tmcd` timecode, and `NCDT` MakerNote.
 pub fn generate_sample_nev_file(path: &Path) -> Result<()> {
+    generate_sample_nev_file_with_bit_depth(path, 12)
+}
+
+/// Generates a synthetic 1920x1080 12-bit or 14-bit RGGB `.nev` test file.
+pub fn generate_sample_nev_file_with_bit_depth(path: &Path, bit_depth: u16) -> Result<()> {
+    let bit_depth = if bit_depth >= 14 { 14 } else { 12 };
+    let white_level = if bit_depth == 14 { 16383u16 } else { 4095u16 };
+    let black = if bit_depth == 14 { 600u16 } else { 150u16 };
     let width = 1920u16;
     let height = 1080u16;
     let num_frames = 24usize;
     let wb_rb_levels = [1.95f32, 1.42f32, 1.0f32, 1.0f32];
-    let black_level = [150u16, 150, 150, 150];
+    let black_level = [black, black, black, black];
 
     let bars_rgb: [[f32; 3]; 7] = [
         [0.75, 0.75, 0.75], // 75% White
@@ -397,8 +433,9 @@ pub fn generate_sample_nev_file(path: &Path) -> Result<()> {
                     1 | 2 => rgb[1],
                     _ => rgb[2] / wb_rb_levels[1],
                 };
-                let adu = 150.0 + sensor_linear.clamp(0.0, 1.0) * (4095.0 - 150.0);
-                bayer[y * (width as usize) + x] = (adu.round() as u16).clamp(150, 4095);
+                let adu =
+                    (black as f32) + sensor_linear.clamp(0.0, 1.0) * ((white_level - black) as f32);
+                bayer[y * (width as usize) + x] = (adu.round() as u16).clamp(black, white_level);
             }
         }
         frames.push(bayer);
@@ -409,7 +446,15 @@ pub fn generate_sample_nev_file(path: &Path) -> Result<()> {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let bytes = build_synthetic_nev(width, height, &frames, wb_rb_levels, black_level, 800);
+    let bytes = build_synthetic_nev_with_bit_depth(
+        width,
+        height,
+        bit_depth,
+        &frames,
+        wb_rb_levels,
+        black_level,
+        800,
+    );
     std::fs::write(path, bytes)?;
     Ok(())
 }

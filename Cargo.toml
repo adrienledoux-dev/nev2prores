@@ -1,6 +1,6 @@
 [package]
 name = "nev2prores"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 rust-version = "1.88"
 description = "Native macOS Apple Silicon Nikon N-RAW (.nev) to 12-Bit ProRes 4444 / N-Log Transcoder & Grading Studio"

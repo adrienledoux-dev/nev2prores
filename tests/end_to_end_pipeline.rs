@@ -2,7 +2,9 @@ use std::fs;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use nev2prores::demuxer::{build_synthetic_nev, demux_nev_file};
+use nev2prores::demuxer::{
+    build_synthetic_nev, build_synthetic_nev_with_bit_depth, demux_nev_file,
+};
 use nev2prores::encoder::{decode_prores_frame_to_rgba16f, ProResCodec};
 use nev2prores::metal_pipeline::{ColorPipelineParams, MetalColorPipeline, ScaleMode};
 use nev2prores::{transcode_nev_file, transcode_nev_file_with_progress, TranscodeOptions};
@@ -259,4 +261,97 @@ fn test_prores422hq_half_scale_transcode() {
     assert_eq!(&mov_demuxed.video_codec_fourcc, b"apch");
     assert_eq!(mov_demuxed.width, 64);
     assert_eq!(mov_demuxed.height, 36);
+}
+
+#[test]
+fn test_14bit_bayer_nev_to_prores4444xq_and_lossless_16bit_b64a() {
+    let dir = tempdir().expect("create tempdir");
+    let nev_path = dir.path().join("DSC_14BIT.NEV");
+    let out_xq_dir = dir.path().join("out_xq");
+    let out_raw16_dir = dir.path().join("out_raw16");
+
+    let width = 128u16;
+    let height = 72u16;
+    // Build a genuine 14-bit RGGB Bayer frame spanning [600..16383] ADU
+    let mut bayer14 = vec![0u16; (width as usize) * (height as usize)];
+    for y in 0..(height as usize) {
+        for x in 0..(width as usize) {
+            let phase = ((y & 1) << 1) | (x & 1);
+            let ramp = 600 + (((x * 115 + y * 45) % 15400) as u16);
+            bayer14[y * (width as usize) + x] = match phase {
+                0 => ramp,
+                1 | 2 => (ramp + 250).min(16383),
+                _ => (ramp + 100).min(16383),
+            };
+        }
+    }
+
+    let nev_bytes = build_synthetic_nev_with_bit_depth(
+        width,
+        height,
+        14,
+        &[bayer14.clone()],
+        [2.02, 1.46, 1.0, 1.0],
+        [600, 600, 600, 600],
+        400,
+    );
+    fs::write(&nev_path, &nev_bytes).expect("write 14-bit synthetic .nev");
+
+    let demuxed_14 = demux_nev_file(&nev_path).expect("demux 14-bit .nev");
+    assert_eq!(demuxed_14.bit_depth, 14);
+    assert_eq!(demuxed_14.metadata.white_level, 16383);
+
+    let mut gpu = MetalColorPipeline::new().expect("Metal GPU should initialize");
+
+    // 1. Hardware Apple ProRes 4444 XQ (`ap4x`) from 14-bit Bayer RAW
+    let opts_xq = TranscodeOptions {
+        codec: ProResCodec::ProRes4444XQ,
+        ..TranscodeOptions::default()
+    };
+    let report_xq = transcode_nev_file(&nev_path, &out_xq_dir, &opts_xq, &mut gpu)
+        .expect("14-bit -> ProRes 4444 XQ transcode should succeed");
+    let mov_xq = demux_nev_file(&report_xq.output_mov_path).expect("demux ap4x .mov");
+    assert_eq!(&mov_xq.video_codec_fourcc, b"ap4x");
+
+    // 2. Lossless Uncompressed 16-Bit RGBA (`b64a`) from 14-bit Bayer RAW — bit-exact 16-bit precision!
+    let opts_raw16 = TranscodeOptions {
+        codec: ProResCodec::Uncompressed16Bit,
+        ..TranscodeOptions::default()
+    };
+    let report_raw16 = transcode_nev_file(&nev_path, &out_raw16_dir, &opts_raw16, &mut gpu)
+        .expect("14-bit -> Uncompressed 16-bit b64a transcode should succeed");
+    let mov_raw16 = demux_nev_file(&report_raw16.output_mov_path).expect("demux b64a .mov");
+    assert_eq!(&mov_raw16.video_codec_fourcc, b"b64a");
+
+    let params = ColorPipelineParams::from_metadata(
+        width as u32,
+        height as u32,
+        &demuxed_14.metadata,
+        ScaleMode::Full,
+        None,
+        None,
+        None,
+    );
+    let gpu_ref = gpu
+        .process_frame_to_rgba16f_vec(&bayer14, &params)
+        .expect("GPU reference");
+    let mov_bytes = fs::read(&report_raw16.output_mov_path).unwrap();
+    let pkt = &mov_raw16.frames[0];
+    let decoded_16 = decode_prores_frame_to_rgba16f(
+        ProResCodec::Uncompressed16Bit,
+        128,
+        72,
+        &mov_bytes[pkt.file_offset as usize..(pkt.file_offset as usize + pkt.byte_size as usize)],
+    )
+    .expect("decode b64a");
+
+    // Every pixel must match the FP32->FP16 GPU output within <= 0.0006 (~1 LSB of 16-bit / f16)!
+    for (exp, act) in gpu_ref.iter().zip(decoded_16.iter()) {
+        assert!(
+            (exp.to_f32() - act.to_f32()).abs() < 0.001,
+            "16-bit b64a lossless mismatch: {} vs {}",
+            exp.to_f32(),
+            act.to_f32()
+        );
+    }
 }

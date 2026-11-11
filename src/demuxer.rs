@@ -922,6 +922,27 @@ pub fn build_synthetic_nev(
     black_level: [u16; 4],
     iso: u16,
 ) -> Vec<u8> {
+    build_synthetic_nev_with_bit_depth(
+        width,
+        height,
+        12,
+        frames_bayer,
+        wb_rb_levels,
+        black_level,
+        iso,
+    )
+}
+
+/// Builds a valid 64-bit ISO-BMFF Nikon `.nev` container in memory with configurable sensor `bit_depth` (12 or 14).
+pub fn build_synthetic_nev_with_bit_depth(
+    width: u16,
+    height: u16,
+    bit_depth: u16,
+    frames_bayer: &[Vec<u16>],
+    wb_rb_levels: [f32; 4],
+    black_level: [u16; 4],
+    iso: u16,
+) -> Vec<u8> {
     let mut out = Vec::new();
 
     // 1. `ftyp` box (`niko`)
@@ -941,8 +962,11 @@ pub fn build_synthetic_nev(
     let mut video_sizes = Vec::new();
     for frame in frames_bayer {
         let offset = out.len() as u64;
-        let encoded =
-            crate::decoder::encode_ticoraw_test_frame(frame, width as usize, height as usize);
+        let encoded = if bit_depth >= 14 {
+            crate::decoder::encode_ticoraw_14bit_test_frame(frame, width as usize, height as usize)
+        } else {
+            crate::decoder::encode_ticoraw_test_frame(frame, width as usize, height as usize)
+        };
         video_offsets.push(offset);
         video_sizes.push(encoded.len() as u32);
         out.extend_from_slice(&encoded);
@@ -977,6 +1001,7 @@ pub fn build_synthetic_nev(
         b"traw",
         width,
         height,
+        bit_depth,
         24000,
         (frames_bayer.len() as u64) * 1001,
         &[(frames_bayer.len() as u32, 1001)],
@@ -994,6 +1019,7 @@ pub fn build_synthetic_nev(
         b"in24",
         0,
         0,
+        24,
         48000,
         audio_samples as u64,
         &[(audio_samples, 1)],
@@ -1009,6 +1035,7 @@ pub fn build_synthetic_nev(
         3,
         b"tmcd",
         b"tmcd",
+        0,
         0,
         0,
         24000,
@@ -1045,6 +1072,7 @@ fn build_test_trak(
     codec: &[u8; 4],
     width: u16,
     height: u16,
+    bit_depth: u16,
     timescale: u32,
     duration: u64,
     stts: &[(u32, u32)],
@@ -1092,7 +1120,7 @@ fn build_test_trak(
     if handler == b"vide" {
         entry[32..34].copy_from_slice(&width.to_be_bytes());
         entry[34..36].copy_from_slice(&height.to_be_bytes());
-        entry[82..84].copy_from_slice(&12u16.to_be_bytes());
+        entry[82..84].copy_from_slice(&bit_depth.to_be_bytes());
     } else if handler == b"soun" {
         entry[24..26].copy_from_slice(&2u16.to_be_bytes()); // 2 channels
         entry[26..28].copy_from_slice(&24u16.to_be_bytes()); // 24-bit

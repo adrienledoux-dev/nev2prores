@@ -1773,7 +1773,26 @@ impl eframe::App for Nev2ProResGuiApp {
                     });
                     ui.separator();
 
-                    ui.label(RichText::new("Hardware VideoToolbox Codec:").strong());
+                    ui.label(RichText::new("Mastering Codec & Bit Depth:").strong());
+                    ui.radio_value(
+                        &mut self.codec,
+                        ProResCodec::ProRes4444XQ,
+                        "Apple ProRes 4444 XQ (ap4x, 12-bit 4:4:4 XQ)",
+                    )
+                    .on_hover_ui(|ui| {
+                        show_pros_cons_tooltip(
+                            ui,
+                            "Apple ProRes 4444 XQ ('ap4x' — 12-Bit 4:4:4 Extreme Quality)",
+                            "Apple's highest-bitrate ProRes cinema profile (~500 Mbps @ 4K), engineered specifically for 14-bit+ dynamic range log sensors.",
+                            &[
+                                "Maximum DCT detail & shadow/highlight preservation when grading 12-bit or 14-bit RAW in N-Log",
+                                "Hardware-accelerated by Apple Silicon's ProRes media engine in Final Cut Pro & Resolve",
+                            ],
+                            &[
+                                "Largest ProRes file size (~50% larger than standard ProRes 4444)",
+                            ],
+                        );
+                    });
                     ui.radio_value(
                         &mut self.codec,
                         ProResCodec::ProRes4444,
@@ -1783,10 +1802,10 @@ impl eframe::App for Nev2ProResGuiApp {
                         show_pros_cons_tooltip(
                             ui,
                             "Apple ProRes 4444 ('ap4h' — 12-Bit 4:4:4)",
-                            "Highest-fidelity Apple ProRes profile with unsubsampled 4:4:4 chroma and 12-bit sample precision.",
+                            "Cinema-grade Apple ProRes profile with unsubsampled 4:4:4 chroma and 12-bit sample precision.",
                             &[
-                                "Full 12-bit precision matches Nikon Z8/Z9 12-bit N-RAW sensor depth without bit-depth loss",
-                                "Unsubsampled 4:4:4 color is ideal for green-screen keying, VFX, and heavy N-Log color grading",
+                                "12-bit logarithmic N-Log preserves 14+ stops of scene dynamic range without banding",
+                                "Unsubsampled 4:4:4 color is ideal for green-screen keying, VFX, and heavy color grading",
                             ],
                             &[
                                 "Approximately ~50% larger file size and higher disk bandwidth than ProRes 422 HQ",
@@ -1809,6 +1828,25 @@ impl eframe::App for Nev2ProResGuiApp {
                             ],
                             &[
                                 "10-bit quantization (vs. 12-bit in 4444) and horizontal 4:2:2 chroma subsampling",
+                            ],
+                        );
+                    });
+                    ui.radio_value(
+                        &mut self.codec,
+                        ProResCodec::Uncompressed16Bit,
+                        "Uncompressed 16-Bit RGB (b64a, 16-bit 4:4:4:4)",
+                    )
+                    .on_hover_ui(|ui| {
+                        show_pros_cons_tooltip(
+                            ui,
+                            "Uncompressed 16-Bit RGBA ('b64a' — Lossless 16-Bit Integer)",
+                            "Writes true 16-bit per channel (65,536 levels) directly from the FP32 Metal pipeline with zero DCT compression.",
+                            &[
+                                "Exceeds 14-bit (16,384 levels) precision — zero compression artifacts for VFX / DI pulls",
+                                "Native QuickTime 'b64a' container with Rec. 2020 tags, 24-bit PCM audio, and tmcd timecode",
+                            ],
+                            &[
+                                "Very high data rate (8 bytes/pixel uncompressed) — requires ultra-fast NVMe storage for 4K/8K playback",
                             ],
                         );
                     });
