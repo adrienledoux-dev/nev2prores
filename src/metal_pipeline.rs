@@ -205,6 +205,8 @@ impl MetalColorPipeline {
         }
 
         let (_, ref buf) = self.cached_bayer_buffer.as_ref().unwrap();
+        // SAFETY: `buf` was allocated with `StorageModeShared` of at least `byte_len` bytes,
+        // and `bayer_rggb` is a valid slice of `byte_len` bytes with non-overlapping memory.
         unsafe {
             ptr::copy_nonoverlapping(
                 bayer_rggb.as_ptr() as *const u8,
@@ -312,6 +314,8 @@ impl MetalColorPipeline {
             cmd_buf.wait_until_completed();
 
             if no_copy_buf.is_none() {
+                // SAFETY: `wait_until_completed()` guarantees the GPU has finished writing into `out_buf_ref`,
+                // and `dst_base_addr` points to a locked destination buffer of `dst_total_bytes` bytes.
                 unsafe {
                     ptr::copy_nonoverlapping(
                         out_buf_ref.contents() as *const u8,
@@ -451,6 +455,46 @@ mod tests {
             "+1 EV should increase N-Log output ({} vs {})",
             g1,
             g0
+        );
+    }
+
+    #[test]
+    fn test_metal_gpu_clipped_sensor_highlights_remain_neutral_white() {
+        let mut gpu = MetalColorPipeline::new().expect("Apple Metal GPU should be available");
+        let width = 64u32;
+        let height = 36u32;
+        // All RGGB photosites saturated at 12-bit sensor rail (4095 ADU)
+        let bayer = vec![4095u16; (width * height) as usize];
+
+        let params = ColorPipelineParams {
+            width,
+            height,
+            scale: ScaleMode::Full,
+            black_level: [150, 150, 150, 150],
+            white_level: 4095,
+            // Asymmetric daylight WB gains that would otherwise turn clipped highlights magenta [2.10, 1.0, 1.45]
+            wb_gains_rggb: [2.10, 1.0, 1.0, 1.45],
+            as_shot_kelvin: 5600,
+            target_kelvin: None,
+            target_tint: None,
+            ev_stops: 0.0,
+        };
+
+        let rgba_f16 = gpu
+            .process_frame_to_rgba16f_vec(&bayer, &params)
+            .expect("GPU shader should execute");
+
+        let idx = ((18 * width + 32) * 4) as usize;
+        let r = rgba_f16[idx].to_f32();
+        let g = rgba_f16[idx + 1].to_f32();
+        let b = rgba_f16[idx + 2].to_f32();
+
+        assert!(
+            (r - g).abs() < 0.02 && (b - g).abs() < 0.02,
+            "Saturated highlights must stay neutral white rather than magenta: R={} G={} B={}",
+            r,
+            g,
+            b
         );
     }
 }

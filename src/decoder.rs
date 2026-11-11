@@ -1,6 +1,8 @@
+use std::ffi::CString;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
@@ -14,12 +16,24 @@ use crate::demuxer::FrameDescriptor;
 pub enum DecoderError {
     #[error("I/O error while reading TicoRAW frame bitstream: {0}")]
     Io(#[from] std::io::Error),
-    #[error("Invalid frame dimensions: {width}x{height}")]
+    #[error("Invalid frame dimensions: {width}x{height} (must be non-zero even RGGB dimensions)")]
     InvalidDimensions { width: usize, height: usize },
     #[error("Corrupt or truncated TicoRAW bitstream (expected {expected} samples, got {actual})")]
     BitstreamTruncated { expected: usize, actual: usize },
-    #[error("Worker thread panicked during parallel TicoRAW decode")]
-    WorkerPanicked,
+    #[error(
+        "Proprietary intoPIX TicoRAW entropy bitstream ({byte_len} bytes for {width}x{height} frame) \
+         requires an external TicoRAW decoder library. Set NEV2PRORES_TICORAW_DYLIB=/path/to/libticoraw_bridge.dylib \
+         exporting `nev2prores_decode_ticoraw`."
+    )]
+    UnsupportedCameraBitstream {
+        byte_len: usize,
+        width: usize,
+        height: usize,
+    },
+    #[error("External TicoRAW dylib decoder failed with status code {0}")]
+    ExternalPluginFailed(i32),
+    #[error("Transcode cancelled by user")]
+    Cancelled,
 }
 
 /// Unpacked 16-bit RGGB Bayer frame ready for zero-copy upload to Apple Metal unified memory.
@@ -48,23 +62,116 @@ pub trait TicoRawDecoder: Send + Sync {
 /// TicoRAW header magic (`"TICO"` = `0x5449434F`) for native line-based wavelet/packed bitstreams.
 pub const TICORAW_MAGIC: &[u8; 4] = b"TICO";
 
+/// C ABI function signature for optional external TicoRAW dylib plugins (`NEV2PRORES_TICORAW_DYLIB`):
+/// `int32_t nev2prores_decode_ticoraw(const uint8_t* bs, size_t bs_len, uint32_t w, uint32_t h, uint16_t* out_rggb)`
+type ExternalDecodeFn = unsafe extern "C" fn(
+    bitstream: *const u8,
+    bitstream_len: usize,
+    width: u32,
+    height: u32,
+    out_bayer_rggb: *mut u16,
+) -> i32;
+
+struct DynamicTicoRawPlugin {
+    handle: *mut libc::c_void,
+    decode_fn: ExternalDecodeFn,
+}
+
+// SAFETY: The dynamically loaded C decoder function is stateless per frame buffer and thread-safe.
+unsafe impl Send for DynamicTicoRawPlugin {}
+unsafe impl Sync for DynamicTicoRawPlugin {}
+
+impl DynamicTicoRawPlugin {
+    fn try_load_from_env() -> Option<Arc<Self>> {
+        let mut candidates = Vec::new();
+        if let Ok(env_path) = std::env::var("NEV2PRORES_TICORAW_DYLIB") {
+            if !env_path.trim().is_empty() {
+                candidates.push(PathBuf::from(env_path));
+            }
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                candidates.push(dir.join("libticoraw_bridge.dylib"));
+                candidates.push(dir.join("../Resources/libticoraw_bridge.dylib"));
+            }
+        }
+        candidates.push(PathBuf::from("/usr/local/lib/libticoraw_bridge.dylib"));
+        candidates.push(PathBuf::from("/opt/homebrew/lib/libticoraw_bridge.dylib"));
+
+        for path in candidates {
+            if !path.exists() {
+                continue;
+            }
+            let Ok(c_path) = CString::new(path.to_string_lossy().as_bytes()) else {
+                continue;
+            };
+            let Ok(sym_name) = CString::new("nev2prores_decode_ticoraw") else {
+                continue;
+            };
+            // SAFETY: `c_path` and `sym_name` are valid NUL-terminated strings; null checks guard `dlopen` and `dlsym`.
+            unsafe {
+                let handle = libc::dlopen(c_path.as_ptr(), libc::RTLD_LAZY | libc::RTLD_LOCAL);
+                if handle.is_null() {
+                    continue;
+                }
+                let sym = libc::dlsym(handle, sym_name.as_ptr());
+                if sym.is_null() {
+                    libc::dlclose(handle);
+                    continue;
+                }
+                let decode_fn: ExternalDecodeFn = std::mem::transmute(sym);
+                return Some(Arc::new(Self { handle, decode_fn }));
+            }
+        }
+        None
+    }
+}
+
+impl Drop for DynamicTicoRawPlugin {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            // SAFETY: `self.handle` was returned by a successful `dlopen` call and is closed once on drop.
+            unsafe {
+                libc::dlclose(self.handle);
+            }
+            self.handle = std::ptr::null_mut();
+        }
+    }
+}
+
 /// Native multithreaded TicoRAW / Nikon N-RAW decoder implementation.
 ///
 /// Supports:
 /// 1. `TICO` headered line-strip 12-bit packed / LeGall 5/3 wavelet bitstreams (decoded in parallel across strips with `rayon`).
 /// 2. Unpacked 16-bit little-endian RGGB bitstreams (`width * height * 2` bytes).
 /// 3. Packed 12-bit RGGB bitstreams (`width * height * 3 / 2` bytes).
-/// 4. Arbitrary compressed `.nev` TicoRAW payloads (reconstructs a deterministic 12-bit RGGB Bayer frame from bitstream entropy).
-#[derive(Debug, Clone, Default)]
+/// 4. Optional external `libticoraw_bridge.dylib` plugin (`NEV2PRORES_TICORAW_DYLIB`) for proprietary camera entropy streams;
+///    returns an explicit `DecoderError::UnsupportedCameraBitstream` error rather than corrupt noise if absent.
+#[derive(Clone, Default)]
 pub struct NativeTicoRawDecoder {
     pub default_black_level: u16,
+    external_plugin: Option<Arc<DynamicTicoRawPlugin>>,
+}
+
+impl std::fmt::Debug for NativeTicoRawDecoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeTicoRawDecoder")
+            .field("default_black_level", &self.default_black_level)
+            .field("has_external_plugin", &self.external_plugin.is_some())
+            .finish()
+    }
 }
 
 impl NativeTicoRawDecoder {
     pub fn new() -> Self {
         Self {
             default_black_level: 150,
+            external_plugin: DynamicTicoRawPlugin::try_load_from_env(),
         }
+    }
+
+    pub fn has_external_plugin(&self) -> bool {
+        self.external_plugin.is_some()
     }
 }
 
@@ -80,7 +187,7 @@ impl TicoRawDecoder for NativeTicoRawDecoder {
         }
         let num_pixels = width * height;
 
-        // Case 1: TICO line-based subband / packed 12-bit bitstream
+        // Case 1: TICO line-based subband / packed 12-bit / LeGall 5/3 wavelet bitstream
         if bitstream.len() >= 16 && &bitstream[0..4] == TICORAW_MAGIC {
             let mode = u32::from_le_bytes([bitstream[4], bitstream[5], bitstream[6], bitstream[7]]);
             let payload = &bitstream[16..];
@@ -111,24 +218,31 @@ impl TicoRawDecoder for NativeTicoRawDecoder {
             return unpack_12bit_parallel(bitstream, width, height);
         }
 
-        // Case 4: Proprietary / external TicoRAW bitstream payload -> parallel strip entropy unpacker
-        let mut out = vec![0u16; num_pixels];
-        let bs_len = bitstream.len().max(1);
-        let black = self.default_black_level;
+        // Case 4: Delegate to external `libticoraw_bridge.dylib` plugin if loaded
+        if let Some(ref plugin) = self.external_plugin {
+            let mut out = vec![0u16; num_pixels];
+            // SAFETY: `bitstream` has `bitstream.len()` valid bytes and `out` has `width * height` writable `u16` elements.
+            let rc = unsafe {
+                (plugin.decode_fn)(
+                    bitstream.as_ptr(),
+                    bitstream.len(),
+                    width as u32,
+                    height as u32,
+                    out.as_mut_ptr(),
+                )
+            };
+            if rc == 0 {
+                return Ok(out);
+            }
+            return Err(DecoderError::ExternalPluginFailed(rc));
+        }
 
-        out.par_chunks_mut(width)
-            .enumerate()
-            .for_each(|(y, row_slice)| {
-                let row_seed = (y * 131 + bs_len) % bs_len;
-                for (x, pixel) in row_slice.iter_mut().enumerate() {
-                    let b0 = bitstream[(row_seed + x * 2) % bs_len] as u16;
-                    let b1 = bitstream[(row_seed + x * 2 + 1) % bs_len] as u16;
-                    let raw12 = ((b0 << 4) | (b1 >> 4)).clamp(black, 4095);
-                    *pixel = raw12;
-                }
-            });
-
-        Ok(out)
+        // Fail explicitly instead of producing silent corrupted imagery
+        Err(DecoderError::UnsupportedCameraBitstream {
+            byte_len: bitstream.len(),
+            width,
+            height,
+        })
     }
 }
 
@@ -250,6 +364,7 @@ impl BoundedDecodePipeline {
         height: usize,
         decoder: Arc<dyn TicoRawDecoder>,
         ring_buffer_capacity: usize,
+        cancel_flag: Option<Arc<AtomicBool>>,
     ) -> Self {
         let cap = ring_buffer_capacity.max(2);
         let (tx, rx) = bounded::<Result<DecodedBayerFrame, DecoderError>>(cap);
@@ -267,6 +382,14 @@ impl BoundedDecodePipeline {
             // Process frames in bounded chunks matching the ring buffer capacity
             // so `rayon` decodes multiple frames simultaneously while keeping RAM bounded.
             for batch in frames.chunks(cap) {
+                if cancel_flag
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Relaxed))
+                {
+                    let _ = tx.send(Err(DecoderError::Cancelled));
+                    return;
+                }
+
                 let mut raw_packets = Vec::with_capacity(batch.len());
                 for desc in batch {
                     if let Err(e) = reader.seek(SeekFrom::Start(desc.file_offset)) {
@@ -346,5 +469,29 @@ mod tests {
             .expect("should decode 12-bit TICO frame");
 
         assert_eq!(orig, unpacked);
+    }
+
+    #[test]
+    fn test_unsupported_bitstream_returns_explicit_error_not_noise() {
+        let decoder = NativeTicoRawDecoder::new();
+        if !decoder.has_external_plugin() {
+            let random_payload = vec![0xABu8; 512];
+            let err = decoder
+                .decode_frame(&random_payload, 128, 72)
+                .expect_err("unknown camera bitstream should return explicit error");
+            assert!(matches!(
+                err,
+                DecoderError::UnsupportedCameraBitstream { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn test_invalid_odd_bayer_dimensions_rejected() {
+        let decoder = NativeTicoRawDecoder::new();
+        assert!(matches!(
+            decoder.decode_frame(&[0u8; 100], 127, 72),
+            Err(DecoderError::InvalidDimensions { .. })
+        ));
     }
 }

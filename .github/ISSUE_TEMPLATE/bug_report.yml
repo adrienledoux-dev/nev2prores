@@ -1,0 +1,41 @@
+name: Bug Report
+description: Report a crash, decode error, color-science discrepancy, or NLE compatibility issue
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting an issue in **nev2prores Studio**! Filling out the details below helps us reproduce it quickly.
+  - type: input
+    id: camera_format
+    attributes:
+      label: Camera Body, Resolution, Frame Rate & Bit Depth
+      description: Which Nikon camera and N-RAW mode recorded the `.nev` clip?
+      placeholder: "e.g., Nikon Z8 — 8.3K 60p N-RAW (High Quality, 12-bit)"
+    validations:
+      required: true
+  - type: input
+    id: macos_hardware
+    attributes:
+      label: Mac Hardware & macOS Version
+      placeholder: "e.g., MacBook Pro M3 Pro (18 GB), macOS 15.3"
+    validations:
+      required: true
+  - type: input
+    id: nle_version
+    attributes:
+      label: Target NLE (Optional)
+      placeholder: "e.g., Final Cut Pro 11.0, DaVinci Resolve Studio 19.1, QuickTime Player"
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened vs. what you expected?
+      description: Include any error message or output from `nev2prores --input clip.nev --inspect-only`.
+    validations:
+      required: true
+  - type: textarea
+    id: inspect_output
+    attributes:
+      label: "`--inspect-only` Output or Logs (Optional)"
+      render: shell

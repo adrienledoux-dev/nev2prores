@@ -7,14 +7,19 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 APP_NAME="nev2prores"
+APP_VERSION="$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)"
+APP_VERSION="${APP_VERSION:-0.2.0}"
+BUNDLE_ID="${APPLE_BUNDLE_ID:-dev.adrienledoux.nev2prores}"
+
 BUNDLE_DIR="$REPO_ROOT/dist/${APP_NAME}.app"
 DMG_STAGING="$REPO_ROOT/dist/dmg_staging"
 DMG_PATH="$REPO_ROOT/dist/${APP_NAME}.dmg"
+CHECKSUM_PATH="$REPO_ROOT/dist/SHA256SUMS.txt"
 ASSETS_DIR="$REPO_ROOT/assets"
 
-mkdir -p "$ASSETS_DIR"
+mkdir -p "$ASSETS_DIR" "$REPO_ROOT/dist"
 
-echo "[1/4] Preparing high-resolution macOS squircle icon (assets/logo_1024.png)..."
+echo "[1/5] Preparing high-resolution macOS squircle icon (assets/logo_1024.png)..."
 if [ -f "$ASSETS_DIR/app_icon_source.jpg" ]; then
     sips -s format png -z 1024 1024 "$ASSETS_DIR/app_icon_source.jpg" --out "$ASSETS_DIR/logo_raw_1024.png" >/dev/null
     python3 - "$ASSETS_DIR/logo_raw_1024.png" "$ASSETS_DIR/logo_1024.png" << 'PYEOF'
@@ -120,10 +125,10 @@ PYEOF
     sips -z 256 256 "$ASSETS_DIR/logo_1024.png" --out "$ASSETS_DIR/logo_256.png" >/dev/null
 fi
 
-echo "[2/4] Building optimized Apple Silicon release binaries (nev2prores-ui & nev2prores)..."
+echo "[2/5] Building optimized Apple Silicon release binaries (v${APP_VERSION})..."
 cargo build --release --bins
 
-echo "[3/4] Assembling macOS application bundle at: $BUNDLE_DIR"
+echo "[3/5] Assembling macOS application bundle at: $BUNDLE_DIR"
 rm -rf "$BUNDLE_DIR"
 mkdir -p "$BUNDLE_DIR/Contents/MacOS"
 mkdir -p "$BUNDLE_DIR/Contents/Resources"
@@ -134,7 +139,7 @@ chmod +x "$BUNDLE_DIR/Contents/MacOS/nev2prores-ui" "$BUNDLE_DIR/Contents/MacOS/
 
 printf "APPL????" > "$BUNDLE_DIR/Contents/PkgInfo"
 
-cat > "$BUNDLE_DIR/Contents/Info.plist" << 'EOF'
+cat > "$BUNDLE_DIR/Contents/Info.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -144,11 +149,11 @@ cat > "$BUNDLE_DIR/Contents/Info.plist" << 'EOF'
     <key>CFBundleDisplayName</key>
     <string>nev2prores Studio</string>
     <key>CFBundleIdentifier</key>
-    <string>com.nikonraw.nev2prores</string>
+    <string>${BUNDLE_ID}</string>
     <key>CFBundleVersion</key>
-    <string>0.1.0</string>
+    <string>${APP_VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>${APP_VERSION}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
@@ -199,11 +204,28 @@ cp "$ASSETS_DIR/logo_1024.png" "$ICONSET_DIR/icon_512x512@2x.png"
 iconutil -c icns "$ICONSET_DIR" -o "$BUNDLE_DIR/Contents/Resources/AppIcon.icns"
 rm -rf "$ICONSET_DIR"
 
-# Also set the custom icon on the .app bundle itself so Finder displays it immediately
 touch "$BUNDLE_DIR"
-codesign --force --deep --sign - "$BUNDLE_DIR"
 
-echo "[4/4] Creating drag-and-drop macOS Disk Image: $DMG_PATH"
+echo "[4/5] Signing macOS Application Bundle..."
+if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+    echo "  -> Signing with Developer ID (Hardened Runtime): $APPLE_SIGNING_IDENTITY"
+    codesign --force --options runtime --timestamp \
+        --sign "$APPLE_SIGNING_IDENTITY" \
+        "$BUNDLE_DIR/Contents/MacOS/nev2prores"
+    codesign --force --options runtime --timestamp \
+        --sign "$APPLE_SIGNING_IDENTITY" \
+        "$BUNDLE_DIR/Contents/MacOS/nev2prores-ui"
+    codesign --force --options runtime --timestamp \
+        --sign "$APPLE_SIGNING_IDENTITY" \
+        "$BUNDLE_DIR"
+    codesign --verify --deep --strict --verbose=2 "$BUNDLE_DIR"
+else
+    echo "  -> No APPLE_SIGNING_IDENTITY set; applying local ad-hoc signature (-)."
+    echo "     (See docs/MACOS_SIGNING_AND_NOTARIZATION.md for Apple Gatekeeper notarization.)"
+    codesign --force --deep --sign - "$BUNDLE_DIR"
+fi
+
+echo "[5/5] Creating drag-and-drop macOS Disk Image: $DMG_PATH"
 hdiutil detach "/Volumes/nev2prores Studio" >/dev/null 2>&1 || true
 rm -rf "$DMG_STAGING" "$DMG_PATH"
 mkdir -p "$DMG_STAGING"
@@ -212,7 +234,34 @@ ln -s /Applications "$DMG_STAGING/Applications"
 hdiutil create -volname "nev2prores Studio" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_PATH" >/dev/null 2>&1
 rm -rf "$DMG_STAGING"
 
+if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
+    echo "  -> Signing Disk Image with Developer ID..."
+    codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DMG_PATH"
+
+    if [ -n "${APPLE_NOTARY_KEYCHAIN_PROFILE:-}" ]; then
+        echo "  -> Submitting DMG to Apple Notary Service (Keychain Profile: $APPLE_NOTARY_KEYCHAIN_PROFILE)..."
+        xcrun notarytool submit "$DMG_PATH" \
+            --keychain-profile "$APPLE_NOTARY_KEYCHAIN_PROFILE" \
+            --wait
+        xcrun stapler staple "$DMG_PATH"
+        xcrun stapler validate "$DMG_PATH"
+    elif [ -n "${APPLE_API_KEY_PATH:-}" ] && [ -n "${APPLE_API_KEY_ID:-}" ] && [ -n "${APPLE_API_ISSUER_ID:-}" ]; then
+        echo "  -> Submitting DMG to Apple Notary Service (App Store Connect API Key: $APPLE_API_KEY_ID)..."
+        xcrun notarytool submit "$DMG_PATH" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait
+        xcrun stapler staple "$DMG_PATH"
+        xcrun stapler validate "$DMG_PATH"
+    fi
+fi
+
+(cd "$REPO_ROOT/dist" && shasum -a 256 "${APP_NAME}.dmg" > "$(basename "$CHECKSUM_PATH")")
+
 echo "================================================================"
-echo "✅ Built macOS Application Bundle : $BUNDLE_DIR"
+echo "✅ Built macOS Application Bundle : $BUNDLE_DIR (v${APP_VERSION})"
 echo "✅ Built Drag-and-Drop DMG Image  : $DMG_PATH"
+echo "✅ Generated SHA-256 Checksum     : $CHECKSUM_PATH"
+cat "$CHECKSUM_PATH"
 echo "================================================================"

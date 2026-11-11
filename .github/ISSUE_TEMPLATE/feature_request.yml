@@ -1,0 +1,36 @@
+name: Suggest an Improvement
+description: Propose a new feature, UI workflow enhancement, camera format, or color-science upgrade
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea to make **nev2prores Studio** better for Nikon RAW shooters and editors? Tell us below!
+  - type: dropdown
+    id: category
+    attributes:
+      label: Area of Improvement
+      options:
+        - Studio GUI / Scopes / Grading UX
+        - Color Science / LUTs / Highlight Roll-Off
+        - Camera & TicoRAW Format Support (Z9, Z8, Z6 III, ZR, etc.)
+        - NLE Integration (Final Cut Pro, DaVinci Resolve, Premiere Pro)
+        - CLI / Batch Automation / Performance
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Workflow Problem or Goal
+      description: What are you trying to do in your post-production workflow?
+      placeholder: "e.g., When offloading an entire CFexpress card with 80 clips, I want to..."
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+      description: How would you ideally like this feature to work in the Studio GUI or CLI?
+    validations:
+      required: true

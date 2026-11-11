@@ -1,6 +1,5 @@
 /target/
-/dist/dmg_staging/
-/dist/AppIcon.iconset/
+/dist/
 .DS_Store
 *.mov
 *.MOV

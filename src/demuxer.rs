@@ -520,6 +520,11 @@ fn parse_stsd_box<R: Read + Seek>(
     if payload_size < 16 {
         return Ok(());
     }
+    if payload_size > 4 * 1024 * 1024 {
+        return Err(DemuxError::InvalidContainer(
+            "stsd box exceeds 4 MB safety limit".into(),
+        ));
+    }
     let mut buf = vec![0u8; payload_size as usize];
     reader.read_exact(&mut buf)?;
 
@@ -1244,5 +1249,39 @@ mod tests {
         assert!((container.metadata.wb_rb_levels[0] - 2.05).abs() < 1e-3);
         assert_eq!(container.metadata.timecode.as_deref(), Some("01:00:00:00"));
         assert!(container.audio_track.is_some());
+    }
+
+    #[test]
+    fn test_demux_malformed_and_truncated_containers_never_panic() {
+        // Empty input -> MissingVideoTrack
+        let mut empty = Cursor::new(Vec::<u8>::new());
+        assert!(matches!(
+            demux_nev_reader(&mut empty),
+            Err(DemuxError::MissingVideoTrack)
+        ));
+
+        // Invalid 32-bit box size (< 8 bytes)
+        let bad_size32 = [0, 0, 0, 4, b'm', b'o', b'o', b'v'];
+        assert!(matches!(
+            demux_nev_reader(&mut Cursor::new(bad_size32)),
+            Err(DemuxError::InvalidContainer(_))
+        ));
+
+        // Truncated 64-bit extended box header (size == 1 without 8-byte largesize)
+        let trunc_size64 = [0, 0, 0, 1, b'm', b'd', b'a', b't', 0, 0, 0];
+        assert!(matches!(
+            demux_nev_reader(&mut Cursor::new(trunc_size64)),
+            Err(DemuxError::InvalidContainer(_))
+        ));
+
+        // Box size exceeding file boundary (OOM / out-of-bounds guard)
+        let mut huge_box = Vec::new();
+        huge_box.extend_from_slice(&1u32.to_be_bytes());
+        huge_box.extend_from_slice(b"moov");
+        huge_box.extend_from_slice(&u64::MAX.to_be_bytes());
+        assert!(matches!(
+            demux_nev_reader(&mut Cursor::new(huge_box)),
+            Err(DemuxError::InvalidContainer(_))
+        ));
     }
 }

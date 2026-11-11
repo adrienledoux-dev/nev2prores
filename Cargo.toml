@@ -1,9 +1,16 @@
 [package]
 name = "nev2prores"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Native macOS Nikon N-RAW (.nev) to 12-Bit ProRes 4444 / N-Log Transcoder"
-authors = ["Systems & Media Pipeline Engineering"]
+rust-version = "1.88"
+description = "Native macOS Apple Silicon Nikon N-RAW (.nev) to 12-Bit ProRes 4444 / N-Log Transcoder & Grading Studio"
+authors = ["Adrien Ledoux <https://github.com/adrienledoux-dev>"]
+license = "Apache-2.0"
+repository = "https://github.com/adrienledoux-dev/nev2prores"
+homepage = "https://adrienledoux-dev.github.io/nev2prores/"
+readme = "README.md"
+keywords = ["nikon", "nraw", "prores", "metal", "videotoolbox"]
+categories = ["multimedia::video", "multimedia::encoding", "command-line-utilities"]
 
 [[bin]]
 name = "nev2prores"

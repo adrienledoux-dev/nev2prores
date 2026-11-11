@@ -3,16 +3,18 @@ pub mod demuxer;
 pub mod encoder;
 pub mod fcpxml;
 pub mod gui;
+pub mod lut;
 pub mod metadata;
 pub mod metal_pipeline;
 
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::decoder::{BoundedDecodePipeline, NativeTicoRawDecoder};
 use crate::demuxer::{build_synthetic_nev, demux_nev_file, NevDemuxedContainer};
@@ -172,16 +174,18 @@ pub fn transcode_nev_file(
     opts: &TranscodeOptions,
     gpu: &mut MetalColorPipeline,
 ) -> Result<TranscodeReport> {
-    transcode_nev_file_with_progress(input_nev, output_dir, opts, gpu, |_, _| {})
+    transcode_nev_file_with_progress(input_nev, output_dir, opts, gpu, None, |_, _| {})
 }
 
 /// Runs the full 4-stage native transcode pipeline on a single `.nev` file, invoking
-/// `on_progress(completed_frames, total_frames)` as each frame is hardware-encoded.
+/// `on_progress(completed_frames, total_frames)` as each frame is hardware-encoded,
+/// and checking `cancel_flag` so partial `.mov` files are deleted cleanly upon cancellation.
 pub fn transcode_nev_file_with_progress<F>(
     input_nev: &Path,
     output_dir: &Path,
     opts: &TranscodeOptions,
     gpu: &mut MetalColorPipeline,
+    cancel_flag: Option<Arc<AtomicBool>>,
     mut on_progress: F,
 ) -> Result<TranscodeReport>
 where
@@ -232,6 +236,7 @@ where
         container.height as usize,
         Arc::new(raw_decoder),
         opts.ring_buffer_capacity,
+        cancel_flag.clone(),
     );
 
     // Stage 4: Hardware VideoToolbox ProRes Session + 64-Bit QuickTime `.mov` Writer
@@ -256,17 +261,41 @@ where
     // Stream frames: CPU TicoRAW decode -> Metal GPU Debayer & N-Log -> VideoToolbox ProRes -> .mov
     let mut frames_transcoded = 0usize;
     for decoded_res in decode_pipeline.receiver().iter() {
-        let decoded_frame = decoded_res.context("TicoRAW frame decode failed")?;
+        if cancel_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            drop(mov_writer);
+            drop(vt_encoder);
+            let _ = std::fs::remove_file(&output_mov_path);
+            bail!("Transcode cancelled by user");
+        }
 
-        let packets = vt_encoder
-            .encode_bayer_frame_with_metal(
-                gpu,
-                &decoded_frame.bayer_rggb,
-                &params,
-                decoded_frame.pts,
-                decoded_frame.duration,
-            )
-            .context("Failed to encode frame via Metal + VideoToolbox")?;
+        let decoded_frame = match decoded_res {
+            Ok(frame) => frame,
+            Err(e) => {
+                drop(mov_writer);
+                drop(vt_encoder);
+                let _ = std::fs::remove_file(&output_mov_path);
+                return Err(e).context("TicoRAW frame decode failed");
+            }
+        };
+
+        let packets = match vt_encoder.encode_bayer_frame_with_metal(
+            gpu,
+            &decoded_frame.bayer_rggb,
+            &params,
+            decoded_frame.pts,
+            decoded_frame.duration,
+        ) {
+            Ok(pkts) => pkts,
+            Err(e) => {
+                drop(mov_writer);
+                drop(vt_encoder);
+                let _ = std::fs::remove_file(&output_mov_path);
+                return Err(e).context("Failed to encode frame via Metal + VideoToolbox");
+            }
+        };
 
         for pkt in &packets {
             mov_writer.write_video_packet(pkt)?;

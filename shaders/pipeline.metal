@@ -55,9 +55,20 @@ inline float sample_bayer_linear(
 
     float black = u.black_level[phase];
     float denom = max(u.white_level - black, 1.0f);
-    float norm = max((float(raw_adu) - black) / denom, 0.0f);
+    float norm = clamp((float(raw_adu) - black) / denom, 0.0f, 1.0f);
 
     return norm * u.wb_gains[phase];
+}
+
+/// Neutralizes false magenta/cyan highlight casts when all 3 camera channels approach
+/// the lowest-gain channel's physical ADC clipping ceiling (`min(wb_gains)`), while
+/// leaving unclipped pixels and saturated colorful lights untouched.
+inline float3 reconstruct_neutral_highlights(float3 cam_rgb, float4 wb_gains) {
+    float clip_ceiling = min(min(wb_gains.x, wb_gains.y), min(wb_gains.z, wb_gains.w));
+    clip_ceiling = max(clip_ceiling, 1e-4f);
+    float min_ch = min(cam_rgb.x, min(cam_rgb.y, cam_rgb.z));
+    float blend = smoothstep(0.90f * clip_ceiling, 0.995f * clip_ceiling, min_ch);
+    return mix(cam_rgb, float3(clip_ceiling), blend);
 }
 
 /// Malvar-He-Cutler (2004) 5x5 edge-directed gradient-corrected RGGB demosaicing.
@@ -127,22 +138,25 @@ inline float3 malvar_he_cutler_5x5(
         r = (6.0f * c00 + 2.0f * (n_nw + n_ne + n_sw + n_se) - 1.5f * (n_w2 + n_e2 + n_n2 + n_s2)) * 0.125f;
     }
 
-    return max(float3(r, g, b), float3(0.0f));
+    float3 rgb = max(float3(r, g, b), float3(0.0f));
+    return reconstruct_neutral_highlights(rgb, u.wb_gains);
 }
 
-/// Official Nikon N-Log Transfer Function Encoding.
+/// Official Nikon N-Log Transfer Function Encoding (Nikon N-Log Specification Document).
 /// Maps scene-linear reflection `x` into the 10-bit reference domain `y in [0, 1023]`,
 /// then normalizes to `V = y / 1023.0` in `[0.0, 1.0]`.
 ///
-/// Cut-off threshold:
-///   x_0 = ((452 - 128) / 650)^3 - 0.0075 = (324 / 650)^3 - 0.0075 ~= 0.11659684f
+/// Cut-off threshold (where both branches meet continuously at `y = 452` with matching slope):
+///   `x_0 = (452 / 650)^3 - 0.0075 ~= 0.32818866f`
+///   - For `x < x_0`:  `y = 650.0 * (x + 0.0075)^(1/3)`   (0% black -> ~127.2, 18% gray -> ~372.0)
+///   - For `x >= x_0`: `y = 150.0 * ln(x) + 619.0`
 inline float nikon_nlog_encode_scalar(float x) {
     const float x_clamped = max(x, 0.0f);
-    const float x0 = 0.11659684f; // ((452.0 - 128.0) / 650.0)^3 - 0.0075
+    const float x0 = 0.32818866f; // (452.0 / 650.0)^3 - 0.0075
 
     float y;
     if (x_clamped < x0) {
-        y = 650.0f * pow(x_clamped + 0.0075f, 1.0f / 3.0f) + 128.0f;
+        y = 650.0f * pow(x_clamped + 0.0075f, 1.0f / 3.0f);
     } else {
         y = 150.0f * log(x_clamped) + 619.0f;
     }

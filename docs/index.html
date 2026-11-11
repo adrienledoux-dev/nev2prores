@@ -1,0 +1,751 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- MANDATORY: Declare support for both light and dark themes -->
+  <meta name="color-scheme" content="light dark">
+  <title>nev2prores Studio — Native macOS Nikon N-RAW (.nev) to 12-Bit ProRes 4444 &amp; N-Log</title>
+  <meta name="description" content="Open-source native macOS Apple Silicon transcoder and scene-linear RAW grading studio for Nikon Z8 / Z9 .nev files to 12-bit Apple ProRes 4444 and N-Log / Rec. 2020.">
+  <link rel="icon" type="image/png" href="logo.png">
+  <style>
+    :root {
+      /* Raw light & dark color tokens */
+      --bg-canvas-light: #f6f7fb;
+      --bg-canvas-dark: #0d0f14;
+      --bg-surface-light: #ffffff;
+      --bg-surface-dark: #151922;
+      --bg-subtle-light: #eef0f6;
+      --bg-subtle-dark: #1c2230;
+      --border-light: #d7dce8;
+      --border-dark: #2a3142;
+      --text-primary-light: #111520;
+      --text-primary-dark: #f2f4fa;
+      --text-muted-light: #4a5368;
+      --text-muted-dark: #9ea8bf;
+      --brand-gold-light: #b87b00;
+      --brand-gold-dark: #f5c438;
+      --brand-cta-bg-light: #141821;
+      --brand-cta-bg-dark: #f5c438;
+      --brand-cta-fg-light: #ffffff;
+      --brand-cta-fg-dark: #10131a;
+      --ok-light: #0f7b43;
+      --ok-dark: #4ade80;
+      --err-light: #b42318;
+      --err-dark: #f87171;
+
+      /* Default assignments (light) */
+      --bg-canvas: var(--bg-canvas-light);
+      --bg-surface: var(--bg-surface-light);
+      --bg-subtle: var(--bg-subtle-light);
+      --border-color: var(--border-light);
+      --text-primary: var(--text-primary-light);
+      --text-muted: var(--text-muted-light);
+      --accent-color: var(--brand-gold-light);
+      --cta-bg: var(--brand-cta-bg-light);
+      --cta-fg: var(--brand-cta-fg-light);
+      --status-ok: var(--ok-light);
+      --status-err: var(--err-light);
+
+      /* MANDATORY: Fallback for browsers without light-dark support */
+      @media (prefers-color-scheme: dark) {
+        --bg-canvas: var(--bg-canvas-dark);
+        --bg-surface: var(--bg-surface-dark);
+        --bg-subtle: var(--bg-subtle-dark);
+        --border-color: var(--border-dark);
+        --text-primary: var(--text-primary-dark);
+        --text-muted: var(--text-muted-dark);
+        --accent-color: var(--brand-gold-dark);
+        --cta-bg: var(--brand-cta-bg-dark);
+        --cta-fg: var(--brand-cta-fg-dark);
+        --status-ok: var(--ok-dark);
+        --status-err: var(--err-dark);
+      }
+
+      @supports (color: light-dark(white, black)) {
+        --bg-canvas: light-dark(var(--bg-canvas-light), var(--bg-canvas-dark));
+        --bg-surface: light-dark(var(--bg-surface-light), var(--bg-surface-dark));
+        --bg-subtle: light-dark(var(--bg-subtle-light), var(--bg-subtle-dark));
+        --border-color: light-dark(var(--border-light), var(--border-dark));
+        --text-primary: light-dark(var(--text-primary-light), var(--text-primary-dark));
+        --text-muted: light-dark(var(--text-muted-light), var(--text-muted-dark));
+        --accent-color: light-dark(var(--brand-gold-light), var(--brand-gold-dark));
+        --cta-bg: light-dark(var(--brand-cta-bg-light), var(--brand-cta-bg-dark));
+        --cta-fg: light-dark(var(--brand-cta-fg-light), var(--brand-cta-fg-dark));
+        --status-ok: light-dark(var(--ok-light), var(--ok-dark));
+        --status-err: light-dark(var(--err-light), var(--err-dark));
+      }
+
+      /* MANDATORY: Automatically adapt native UI to user system preferences */
+      color-scheme: light dark;
+      accent-color: var(--accent-color);
+    }
+
+    *, *::before, *::after {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg-canvas);
+      color: var(--text-primary);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Typographic wrapping rules */
+    h1, h2, h3, h4 {
+      text-wrap: balance;
+      line-height: 1.22;
+      letter-spacing: -0.02em;
+      margin-block: 0 0.65rem;
+    }
+
+    p, blockquote, li {
+      text-wrap: pretty;
+      margin-block: 0 0.85rem;
+    }
+
+    a {
+      color: var(--accent-color);
+      text-underline-offset: 0.18em;
+    }
+
+    .container {
+      max-inline-size: 66rem;
+      margin-inline: auto;
+      padding-inline: 1.5rem;
+    }
+
+    /* Top navigation */
+    header.site-nav {
+      border-block-end: 1px solid var(--border-color);
+      background-color: var(--bg-surface);
+    }
+
+    .nav-inner {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      padding-block: 0.9rem;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.65rem;
+      font-weight: 700;
+      font-size: 1.05rem;
+      color: var(--text-primary);
+      text-decoration: none;
+    }
+
+    .nav-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1.25rem;
+      font-size: 0.94rem;
+    }
+
+    .nav-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-weight: 500;
+    }
+
+    .nav-links a:hover,
+    .nav-links a:focus-visible {
+      color: var(--text-primary);
+      text-decoration: underline;
+    }
+
+    /* Hero section */
+    .hero {
+      padding-block: 4rem 3rem;
+      text-align: center;
+    }
+
+    .hero-logo {
+      border-radius: 26px;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
+      margin-block-end: 1.4rem;
+    }
+
+    .eyebrow {
+      display: inline-block;
+      font-size: 0.82rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 0.28rem 0.75rem;
+      border-radius: 999px;
+      background-color: var(--bg-subtle);
+      border: 1px solid var(--border-color);
+      color: var(--accent-color);
+      margin-block-end: 1rem;
+    }
+
+    .hero h1 {
+      font-size: clamp(2rem, 4.5vw, 3.1rem);
+      max-inline-size: 24ch;
+      margin-inline: auto;
+    }
+
+    .hero-subtitle {
+      font-size: clamp(1.05rem, 2vw, 1.22rem);
+      color: var(--text-muted);
+      max-inline-size: 62ch;
+      margin-inline: auto;
+      margin-block-end: 2rem;
+    }
+
+    .cta-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 0.85rem;
+      margin-block-end: 1rem;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      min-block-size: 2.75rem;
+      padding: 0.65rem 1.35rem;
+      border-radius: 0.6rem;
+      font-weight: 600;
+      font-size: 0.98rem;
+      text-decoration: none;
+      border: 1px solid transparent;
+      transition: transform 0.12s ease, opacity 0.12s ease;
+    }
+
+    .btn-primary {
+      background-color: var(--cta-bg);
+      color: var(--cta-fg);
+    }
+
+    .btn-secondary {
+      background-color: var(--bg-surface);
+      color: var(--text-primary);
+      border-color: var(--border-color);
+    }
+
+    .btn:hover {
+      opacity: 0.92;
+    }
+
+    .meta-note {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    /* Feature cards */
+    section {
+      padding-block: 2.5rem;
+    }
+
+    .section-header {
+      margin-block-end: 1.75rem;
+    }
+
+    .section-header h2 {
+      font-size: clamp(1.5rem, 3vw, 2rem);
+    }
+
+    .section-header p {
+      color: var(--text-muted);
+      max-inline-size: 65ch;
+    }
+
+    .grid-cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+      gap: 1.15rem;
+    }
+
+    .card {
+      background-color: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 0.85rem;
+      padding: 1.35rem;
+    }
+
+    .card h3 {
+      font-size: 1.08rem;
+      margin-block-end: 0.45rem;
+    }
+
+    .card p {
+      color: var(--text-muted);
+      font-size: 0.94rem;
+      margin-block-end: 0;
+    }
+
+    .step-badge {
+      display: inline-block;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.76rem;
+      font-weight: 700;
+      color: var(--accent-color);
+      margin-block-end: 0.4rem;
+    }
+
+    /* Always-dark code blocks with re-declared inherited properties */
+    pre, code {
+      color-scheme: dark;
+      /* Mandatory: re-declare inherited color properties on subtree color-scheme override */
+      accent-color: var(--accent-color);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    code {
+      font-size: 0.88em;
+      background-color: #161b26;
+      color: #e6edf7;
+      padding: 0.15em 0.4em;
+      border-radius: 0.3rem;
+    }
+
+    pre {
+      margin: 0;
+      background-color: #10141d;
+      color: #e6edf7;
+      border: 1px solid #283144;
+      border-radius: 0.75rem;
+      padding: 1rem 1.15rem;
+      padding-inline-end: 3.25rem;
+      overflow-x: auto;
+      font-size: 0.88rem;
+      line-height: 1.55;
+    }
+
+    pre code {
+      background: none;
+      padding: 0;
+      font-size: inherit;
+      color: inherit;
+    }
+
+    .snippet-label {
+      font-size: 0.88rem;
+      font-weight: 600;
+      margin-block: 1.25rem 0.45rem;
+    }
+
+    /* Invoker-command accessible Copy Button pattern */
+    .copyable {
+      display: flex;
+      align-items: start;
+      gap: 0.5rem;
+    }
+
+    .copyable pre {
+      flex: 1;
+      min-inline-size: 0;
+    }
+
+    .copyable .copy {
+      flex: none;
+      order: 1;
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+    }
+
+    .copy-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-inline-size: 32px;
+      min-block-size: 32px;
+      padding: 0.35rem;
+      border-radius: 0.45rem;
+      border: 1px solid #364158;
+      background-color: rgba(22, 27, 38, 0.94);
+      color: #e6edf7;
+      cursor: pointer;
+    }
+
+    .copy-button:hover,
+    .copy-button:focus-visible {
+      border-color: #f5c438;
+      color: #ffffff;
+    }
+
+    .copy-button svg {
+      inline-size: 16px;
+      block-size: 16px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .copy-button .icon-check {
+      display: none;
+      stroke: #4ade80;
+    }
+
+    .copy-button[data-copied] .icon-copy {
+      display: none;
+    }
+
+    .copy-button[data-copied] .icon-check {
+      display: block;
+    }
+
+    .copy .tip {
+      position: absolute;
+      inset-inline-end: calc(100% + 0.45rem);
+      inset-block-start: 50%;
+      transform: translateY(-50%);
+      white-space: nowrap;
+      font-size: 0.76rem;
+      font-weight: 600;
+      padding: 0.22rem 0.55rem;
+      border-radius: 0.35rem;
+      background-color: #1c2434;
+      color: #f2f4fa;
+      border: 1px solid #364158;
+      pointer-events: none;
+      /* Hide with opacity only so role="status" remains in the accessibility tree */
+      opacity: 0;
+      transition: opacity 0.15s ease;
+    }
+
+    .copy-button[data-copied] + .tip,
+    .copy-button[data-failed] + .tip {
+      opacity: 1;
+    }
+
+    .copy-button[data-failed] + .tip {
+      border-color: #f87171;
+      color: #fecaca;
+    }
+
+    @media (hover: hover) {
+      .copyable {
+        display: block;
+        position: relative;
+      }
+
+      .copyable .copy {
+        position: absolute;
+        inset-block-start: 0.55rem;
+        inset-inline-end: 0.55rem;
+      }
+
+      .copyable .copy-button {
+        opacity: 0;
+        transition: opacity 0.15s ease;
+      }
+
+      .copyable:hover .copy-button,
+      .copyable:focus-within .copy-button,
+      .copyable .copy-button:focus-visible,
+      .copyable .copy-button[data-copied],
+      .copyable .copy-button[data-failed] {
+        opacity: 1;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .btn,
+      .copy-button,
+      .copy .tip {
+        transition: opacity 0.1s linear;
+      }
+    }
+
+    /* Callout box */
+    .callout {
+      background-color: var(--bg-subtle);
+      border: 1px solid var(--border-color);
+      border-inline-start: 4px solid var(--accent-color);
+      border-radius: 0.65rem;
+      padding: 1.1rem 1.25rem;
+      margin-block-start: 1.25rem;
+    }
+
+    .callout strong {
+      display: block;
+      margin-block-end: 0.3rem;
+    }
+
+    /* Community CTA */
+    .community-banner {
+      background-color: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: 1rem;
+      padding: 2rem;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1.5rem;
+    }
+
+    .community-banner-copy {
+      max-inline-size: 48ch;
+    }
+
+    footer {
+      border-block-start: 1px solid var(--border-color);
+      padding-block: 2rem;
+      margin-block-start: 2rem;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <header class="site-nav">
+    <div class="container nav-inner">
+      <a class="brand" href="./">
+        <span>nev2prores Studio</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#pipeline">Architecture</a>
+        <a href="#install">Download &amp; CLI</a>
+        <a href="#community">Suggest Improvements</a>
+        <a href="https://github.com/adrienledoux-dev/nev2prores">GitHub Repository</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <img
+        class="hero-logo"
+        src="logo.png"
+        alt="nev2prores Studio cinema lens app icon"
+        width="124"
+        height="124"
+        fetchpriority="high"
+      >
+      <div><span class="eyebrow">Open-Source macOS Apple Silicon Tool • Apache-2.0</span></div>
+      <h1>Nikon N-RAW (<code>.nev</code>) to 12-Bit Apple ProRes 4444 &amp; N-Log Studio</h1>
+      <p class="hero-subtitle">
+        A zero-FFmpeg native Rust, Apple Metal, and VideoToolbox studio &amp; CLI for grading Nikon Z8 / Z9 RAW video in scene-linear light (Kelvin, Tint, Exposure, 3D LUTs &amp; RGB Scopes) before encoding 12-bit ProRes 4444 with Final Cut Pro FCPXML v1.11 metadata.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/adrienledoux-dev/nev2prores/releases/latest/download/nev2prores.dmg">
+          Download nev2prores.dmg (macOS 13+ Apple Silicon)
+        </a>
+        <a class="btn btn-secondary" href="https://github.com/adrienledoux-dev/nev2prores/issues/new?template=feature_request.yml">
+          Suggest an Improvement
+        </a>
+        <a class="btn btn-secondary" href="https://github.com/adrienledoux-dev/nev2prores">
+          View Source on GitHub
+        </a>
+      </div>
+      <p class="meta-note">
+        Requires Apple Silicon (M1 / M2 / M3 / M4) running macOS 13 Ventura or later • Includes both <code>nev2prores Studio.app</code> &amp; <code>nev2prores</code> CLI
+      </p>
+    </section>
+
+    <section id="pipeline">
+      <div class="section-header">
+        <h2>4-Stage Native Apple Silicon Pipeline</h2>
+        <p>
+          Every stage runs directly on macOS system frameworks using Unified Memory zero-copy sharing between CPU performance cores, the Apple Metal GPU, and the dedicated ProRes Media Engine.
+        </p>
+      </div>
+      <div class="grid-cards">
+        <article class="card">
+          <span class="step-badge">STAGE 01 • DEMUX &amp; NCDT</span>
+          <h3>64-Bit ISO-BMFF &amp; Nikon MakerNote</h3>
+          <p>
+            Zero-copy <code>co64</code> box walker for multi-gigabyte 8K60 <code>.nev</code> files. Extracts embedded <code>NCDT</code> As-Shot White Balance (<code>0x000C</code>), optical Black Level (<code>0x003D</code>), ISO, shutter angle, 24-bit PCM audio, and SMPTE <code>tmcd</code> timecode.
+          </p>
+        </article>
+        <article class="card">
+          <span class="step-badge">STAGE 02 • RAYON CPU POOL</span>
+          <h3>Bounded TicoRAW Bitstream Pipeline</h3>
+          <p>
+            Parallel frame unpacking across Apple Silicon P-cores using a bounded ring buffer so RAM stays flat even on 100+ GB 8K clips, with optional <code>NEV2PRORES_TICORAW_DYLIB</code> C ABI plugin loading.
+          </p>
+        </article>
+        <article class="card">
+          <span class="step-badge">STAGE 03 • METAL COMPUTE</span>
+          <h3>5×5 Debayer, Bradford WB &amp; Official N-Log</h3>
+          <p>
+            Shared-memory FP32 Metal compute shader executing Malvar-He-Cutler demosaicing, neutral highlight reconstruction, scene-linear Exposure &amp; Bradford chromatic adaptation into ITU-R BT.2020, and continuous Nikon N-Log encoding.
+          </p>
+        </article>
+        <article class="card">
+          <span class="step-badge">STAGE 04 • VIDEOTOOLBOX</span>
+          <h3>12-Bit ProRes 4444 &amp; FCPXML v1.11</h3>
+          <p>
+            IOSurface-backed <code>VTCompressionSession</code> encoding for ProRes 4444 (<code>ap4h</code>) and 422 HQ (<code>apch</code>), muxed with Rec. 2020 <code>colr</code> (<code>9-1-9</code>), 24-bit little-endian PCM audio (<code>wave/enda</code>), <code>tmcd</code>, and Final Cut Pro XML sidecars.
+          </p>
+        </article>
+        <article class="card">
+          <span class="step-badge">STUDIO UI • SCOPES &amp; LUTS</span>
+          <h3>Per-Clip Grading, Scopes &amp; <code>.cube</code> LUTs</h3>
+          <p>
+            Interactive 60 fps GPU viewport with per-clip Kelvin/Tint/EV memory, one-click Copy Grade to All, non-destructive 17³/33³/65³ <code>.cube</code> 3D LUT trilinear preview, 64-bin RGB N-Log histogram scopes, and highlight zebras.
+          </p>
+        </article>
+        <article class="card">
+          <span class="step-badge">QUALITY • VERIFIED CI</span>
+          <h3>Hardware Round-Trip Tested</h3>
+          <p>
+            Every pull request is verified on Apple Silicon runners with <code>VTDecompressionSession</code> ProRes round-trip golden accuracy assertions, highlight neutrality checks, and malformed container fuzzing.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section id="install">
+      <div class="section-header">
+        <h2>Install &amp; Command-Line Quickstart</h2>
+        <p>
+          Open <code>nev2prores.dmg</code> and drag <strong>nev2prores.app</strong> into <strong>Applications</strong>, or build directly from Rust source with Cargo.
+        </p>
+      </div>
+
+      <p class="snippet-label">1. Build &amp; bundle from source (Rust 1.88+ on macOS Apple Silicon):</p>
+      <div class="copyable">
+        <span class="copy">
+          <button type="button" class="copy-button" command="--copy" commandfor="cmd-build" aria-label="Copy source build commands">
+            <svg class="icon-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>
+          </button>
+          <span class="tip" role="status"></span>
+        </span>
+        <pre tabindex="0"><code id="cmd-build">git clone https://github.com/adrienledoux-dev/nev2prores.git
+cd nev2prores
+./scripts/bundle_macos_app.sh
+cp -R dist/nev2prores.app /Applications/</code></pre>
+      </div>
+
+      <p class="snippet-label">2. Batch transcode a card folder to 12-bit ProRes 4444 + Final Cut Pro FCPXML v1.11:</p>
+      <div class="copyable">
+        <span class="copy">
+          <button type="button" class="copy-button" command="--copy" commandfor="cmd-cli" aria-label="Copy CLI batch transcode command">
+            <svg class="icon-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+            <svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>
+          </button>
+          <span class="tip" role="status"></span>
+        </span>
+        <pre tabindex="0"><code id="cmd-cli">/Applications/nev2prores.app/Contents/MacOS/nev2prores \
+  --input /Volumes/NIKON_Z9/DCIM/100NCZ_9 \
+  --output ~/Movies/ProRes_Masters \
+  --codec prores4444 \
+  --kelvin 5600 \
+  --ev 0.35 \
+  --fcpxml</code></pre>
+      </div>
+
+      <div class="callout">
+        <strong>First-Launch Note for Unsigned Community Builds</strong>
+        <p style="margin-block-end: 0.55rem;">
+          If a release was built before Apple Developer ID notarization secrets were enabled, macOS Gatekeeper may pause on first launch. Clear the quarantine flag once in Terminal (or see our <a href="https://github.com/adrienledoux-dev/nev2prores/blob/main/docs/MACOS_SIGNING_AND_NOTARIZATION.md">macOS Code Signing &amp; Notarization Guide</a>):
+        </p>
+        <div class="copyable">
+          <span class="copy">
+            <button type="button" class="copy-button" command="--copy" commandfor="cmd-xattr" aria-label="Copy Gatekeeper quarantine removal command">
+              <svg class="icon-copy" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+              <svg class="icon-check" viewBox="0 0 24 24" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            </button>
+            <span class="tip" role="status"></span>
+          </span>
+          <pre tabindex="0"><code id="cmd-xattr">xattr -dr com.apple.quarantine /Applications/nev2prores.app</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="community">
+      <div class="community-banner">
+        <div class="community-banner-copy">
+          <h2>Help Shape nev2prores Studio</h2>
+          <p style="margin-block-end: 0;">
+            Have a Nikon Z8, Z9, Z6 III, or ZR camera sample, a color-science improvement, an NLE workflow idea, or a bug report? Open a structured feature request or pull request on GitHub—every contribution is tested automatically on Apple Silicon CI before merge.
+          </p>
+        </div>
+        <div class="cta-row" style="margin-block-end: 0;">
+          <a class="btn btn-primary" href="https://github.com/adrienledoux-dev/nev2prores/issues/new?template=feature_request.yml">
+            Suggest a Feature
+          </a>
+          <a class="btn btn-secondary" href="https://github.com/adrienledoux-dev/nev2prores/issues/new?template=bug_report.yml">
+            Report a Bug
+          </a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container">
+      <p style="margin-block-end: 0.35rem;">
+        Licensed under the <a href="https://github.com/adrienledoux-dev/nev2prores/blob/main/LICENSE">Apache License 2.0</a> • Built by <a href="https://github.com/adrienledoux-dev">Adrien Ledoux</a> &amp; contributors.
+      </p>
+      <p style="margin-block-end: 0;">
+        Disclaimer: <code>nev2prores</code> is an independent open-source project and is not affiliated with, endorsed by, or sponsored by Nikon Corporation, intoPIX SA, or Apple Inc. Nikon, N-RAW, and N-Log are trademarks of Nikon Corporation; TicoRAW is a trademark of intoPIX SA; Apple, macOS, Final Cut Pro, Metal, and ProRes are trademarks of Apple Inc.
+      </p>
+    </div>
+  </footer>
+
+  <script>
+    (() => {
+      const timers = new WeakMap();
+      let lastMessage = '';
+
+      function report(button, ok) {
+        const tip = button.nextElementSibling;
+        clearTimeout(timers.get(button));
+        button.removeAttribute('data-copied');
+        button.removeAttribute('data-failed');
+        let message = ok ? 'Copied' : 'Copy failed';
+        if (message === lastMessage) message += '\u00A0';
+        lastMessage = message;
+        tip.textContent = '';
+        void button.offsetWidth;
+        button.setAttribute(ok ? 'data-copied' : 'data-failed', '');
+        requestAnimationFrame(() => {
+          tip.textContent = message;
+        });
+        timers.set(button, setTimeout(() => {
+          button.removeAttribute('data-copied');
+          button.removeAttribute('data-failed');
+          tip.textContent = '';
+        }, 2000));
+      }
+
+      async function copy(button, target) {
+        const text = target.matches('input, textarea') ? target.value : target.innerText.trim();
+        if (!text) return;
+        try {
+          await navigator.clipboard.writeText(text);
+          report(button, true);
+        } catch {
+          report(button, false);
+        }
+      }
+
+      if ('CommandEvent' in window) {
+        document.addEventListener('command', (event) => {
+          if (event.command.startsWith('--copy')) {
+            copy(event.source, event.target);
+          }
+        }, true);
+      } else {
+        document.addEventListener('click', (event) => {
+          const button = event.target.closest('button[command^="--copy"]');
+          if (!button) return;
+          const target = document.getElementById(button.getAttribute('commandfor'));
+          if (target) copy(button, target);
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

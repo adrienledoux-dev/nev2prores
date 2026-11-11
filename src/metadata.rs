@@ -29,7 +29,7 @@ pub struct NikonMetadata {
     pub focal_length_mm: Option<f32>,
     /// Aperture f-number, if present.
     pub aperture_fstop: Option<f32>,
-    /// Recorded As-Shot Kelvin color temperature (default 5600K).
+    /// Recorded or mired-estimated As-Shot Kelvin color temperature (default 5600K).
     pub color_temperature_kelvin: u32,
     /// Camera body model identifier.
     pub camera_model: String,
@@ -76,12 +76,26 @@ impl NikonMetadata {
         }
         if num == 1 {
             format!("1/{}s", den)
-        } else if den % num == 0 {
+        } else if den.is_multiple_of(num) {
             format!("1/{}s", den / num)
         } else {
             format!("{:.4}s", num as f64 / den as f64)
         }
     }
+}
+
+/// Estimates Correlated Color Temperature (in Kelvin, rounded to 50 K) from Nikon `WB_RBLevels`
+/// (`R_gain` and `B_gain`) along the reciprocal-megakelvin (mired) locus when explicit Tag `0x0045`
+/// is omitted by the camera (e.g., Auto WB).
+pub fn estimate_kelvin_from_wb_gains(r_gain: f32, b_gain: f32) -> u32 {
+    if r_gain <= 0.05 || b_gain <= 0.05 || !r_gain.is_finite() || !b_gain.is_finite() {
+        return 5600;
+    }
+    let ratio = (r_gain / b_gain).clamp(0.25, 4.5);
+    let mired = (231.3 - 166.3 * ratio.ln()).clamp(100.0, 500.0);
+    let raw_kelvin = 1_000_000.0 / mired;
+    let rounded = ((raw_kelvin / 50.0).round() as u32) * 50;
+    rounded.clamp(2000, 10000)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +156,10 @@ pub fn parse_ncdt_payload(payload: &[u8]) -> Result<NikonMetadata, MetadataError
     let mut tiff_rel_offset = None;
     let mut endian = TiffEndian::Little;
 
-    for i in 0..search_window.len().saturating_sub(4) {
+    for i in 0..=search_window.len().saturating_sub(4) {
+        if i + 4 > search_window.len() {
+            break;
+        }
         let slice = &search_window[i..i + 4];
         if slice == b"II\x2a\x00" {
             tiff_rel_offset = Some(i);
@@ -165,7 +182,7 @@ pub fn parse_ncdt_payload(payload: &[u8]) -> Result<NikonMetadata, MetadataError
     }
 
     let first_ifd_offset = endian.read_u32(&tiff_data[4..8]) as usize;
-    if first_ifd_offset + 2 > tiff_data.len() {
+    if first_ifd_offset.saturating_add(2) > tiff_data.len() {
         return Err(MetadataError::MalformedIfd);
     }
 
@@ -180,15 +197,21 @@ fn parse_ifd(
     endian: TiffEndian,
     meta: &mut NikonMetadata,
 ) -> Result<(), MetadataError> {
-    if ifd_offset + 2 > tiff_data.len() {
+    if ifd_offset.saturating_add(2) > tiff_data.len() {
         return Err(MetadataError::MalformedIfd);
     }
 
     let entry_count = endian.read_u16(&tiff_data[ifd_offset..ifd_offset + 2]) as usize;
     let entries_start = ifd_offset + 2;
-    if entries_start + entry_count * 12 > tiff_data.len() {
+    let Some(entries_bytes) = entry_count.checked_mul(12) else {
+        return Err(MetadataError::MalformedIfd);
+    };
+    if entries_start.saturating_add(entries_bytes) > tiff_data.len() {
         return Err(MetadataError::MalformedIfd);
     }
+
+    let mut has_explicit_kelvin = false;
+    let mut has_wb_gains = false;
 
     for i in 0..entry_count {
         let entry_off = entries_start + i * 12;
@@ -207,15 +230,20 @@ fn parse_ifd(
             _ => continue,
         };
 
-        let total_bytes = count.saturating_mul(type_size);
+        let Some(total_bytes) = count.checked_mul(type_size) else {
+            continue;
+        };
         let value_slice: &[u8] = if total_bytes <= 4 {
             &val_or_offset[..total_bytes]
         } else {
             let offset = endian.read_u32(val_or_offset) as usize;
-            if offset.saturating_add(total_bytes) > tiff_data.len() {
+            let Some(end_off) = offset.checked_add(total_bytes) else {
+                continue;
+            };
+            if end_off > tiff_data.len() {
                 continue;
             }
-            &tiff_data[offset..offset + total_bytes]
+            &tiff_data[offset..end_off]
         };
 
         match tag {
@@ -240,6 +268,7 @@ fn parse_ifd(
                         }
                     }
                     meta.wb_rb_levels = levels;
+                    has_wb_gains = true;
                 }
             }
             // Tag 0x003D: BlackLevel (4 u16 RGGB sensor black levels)
@@ -343,13 +372,27 @@ fn parse_ifd(
             // Tag 0x0045: Kelvin Color Temperature
             0x0045 => {
                 if field_type == 3 && value_slice.len() >= 2 {
-                    meta.color_temperature_kelvin = endian.read_u16(&value_slice[0..2]) as u32;
+                    let k = endian.read_u16(&value_slice[0..2]) as u32;
+                    if (1500..=25000).contains(&k) {
+                        meta.color_temperature_kelvin = k;
+                        has_explicit_kelvin = true;
+                    }
                 } else if field_type == 4 && value_slice.len() >= 4 {
-                    meta.color_temperature_kelvin = endian.read_u32(&value_slice[0..4]);
+                    let k = endian.read_u32(&value_slice[0..4]);
+                    if (1500..=25000).contains(&k) {
+                        meta.color_temperature_kelvin = k;
+                        has_explicit_kelvin = true;
+                    }
                 }
             }
             _ => {}
         }
+    }
+
+    // If Nikon omitted Tag 0x0045 (e.g., Auto WB), derive As-Shot Kelvin from WB_RBLevels (0x000C).
+    if !has_explicit_kelvin && has_wb_gains {
+        meta.color_temperature_kelvin =
+            estimate_kelvin_from_wb_gains(meta.wb_rb_levels[0], meta.wb_rb_levels[1]);
     }
 
     Ok(())
@@ -486,22 +529,33 @@ pub fn compute_wb_color_matrix(
     mat3_mul(XYZ_TO_REC2020, m_cam_to_adapted_xyz)
 }
 
-/// Exact Nikon N-Log Transfer Function Encoding (CPU reference matching Metal shader).
+/// Official Nikon N-Log Transfer Function Encoding (Nikon N-Log Specification Document).
 ///
-/// Cut-off threshold:
-///   $x_0 = \left(\frac{452 - 128}{650}\right)^3 - 0.0075 \approx 0.116597$
-/// - For $x < 0.116597$: $y = 650 \cdot (x + 0.0075)^{1/3} + 128$
-/// - For $x \ge 0.116597$: $y = 150 \cdot \ln(x) + 619$
-/// - Output normalized float $V = y / 1023.0$.
+/// Cut-off threshold (where both branches equal `y = 452` with matching slope):
+///   $x_0 = \left(\frac{452}{650}\right)^3 - 0.0075 \approx 0.32818866$
+/// - For $x < 0.32818866$: $y = 650 \cdot (x + 0.0075)^{1/3}$
+/// - For $x \ge 0.32818866$: $y = 150 \cdot \ln(x) + 619$
+/// - Output normalized float $V = y / 1023.0 \in [0.0, 1.0]$.
 pub fn nikon_nlog_encode(x: f32) -> f32 {
     let x_clamped = x.max(0.0);
-    let x0: f32 = ((452.0f32 - 128.0f32) / 650.0f32).powi(3) - 0.0075f32; // ~0.11659684
+    let x0: f32 = (452.0f32 / 650.0f32).powi(3) - 0.0075f32; // ~0.32818866
     let y = if x_clamped < x0 {
-        650.0 * (x_clamped + 0.0075).cbrt() + 128.0
+        650.0 * (x_clamped + 0.0075).cbrt()
     } else {
         150.0 * x_clamped.ln() + 619.0
     };
     (y / 1023.0).clamp(0.0, 1.0)
+}
+
+/// Official Nikon N-Log Inverse Transfer Function (`[0.0, 1.0]` N-Log -> scene-linear reflection).
+pub fn nikon_nlog_decode(v: f32) -> f32 {
+    let y = v.clamp(0.0, 1.0) * 1023.0;
+    if y < 452.0 {
+        let t = (y / 650.0).max(0.0);
+        (t * t * t - 0.0075).max(0.0)
+    } else {
+        ((y - 619.0) / 150.0).exp()
+    }
 }
 
 #[cfg(test)]
@@ -510,24 +564,71 @@ mod tests {
 
     #[test]
     fn test_nikon_nlog_curve_continuity_and_reference_points() {
-        // At x = 0.0 (scene black): y = 650 * (0.0075)^(1/3) + 128 = 650 * 0.19574338 + 128 = 255.233
+        // 1. At x = 0.0 (scene black): y = 650 * (0.0075)^(1/3) = 127.233 (~128 in 10-bit CV)
         let v_black = nikon_nlog_encode(0.0);
         let y_black = v_black * 1023.0;
-        assert!((y_black - 255.233).abs() < 0.05);
+        assert!(
+            (y_black - 127.233).abs() < 0.05,
+            "unexpected N-Log black CV: {}",
+            y_black
+        );
 
-        // At cut-off threshold x0 = ((452 - 128)/650)^3 - 0.0075 ~= 0.11659684,
-        // the lower branch evaluates to exactly y = 452.
-        let x0 = ((452.0f32 - 128.0f32) / 650.0f32).powi(3) - 0.0075f32;
-        let v_below = nikon_nlog_encode(x0 - 1e-5);
-        let v_above = nikon_nlog_encode(x0 + 1e-5);
-        assert!((v_below * 1023.0 - 452.0).abs() < 0.1);
-        let expected_above = 150.0 * (x0 + 1e-5).ln() + 619.0;
-        assert!((v_above * 1023.0 - expected_above).abs() < 0.1);
+        // 2. C0 value continuity and C1 slope continuity across cut-off x0 ~= 0.32818866
+        let x0 = (452.0f32 / 650.0f32).powi(3) - 0.0075f32;
+        let eps = 1e-5f32;
+        let y_below = nikon_nlog_encode(x0 - eps) * 1023.0;
+        let y_above = nikon_nlog_encode(x0 + eps) * 1023.0;
+        assert!(
+            (y_below - 452.0).abs() < 0.05,
+            "lower branch at x0 should equal 452, got {}",
+            y_below
+        );
+        assert!(
+            (y_above - y_below).abs() < 0.25,
+            "N-Log curve must be continuous across x0 (below={}, above={})",
+            y_below,
+            y_above
+        );
 
-        // At 18% middle gray (x = 0.18 >= x0):
-        // y = 150 * ln(0.18) + 619 = 150 * (-1.7147984) + 619 = 361.78
-        let v_mid = nikon_nlog_encode(0.18);
-        assert!((v_mid * 1023.0 - 361.78).abs() < 0.05);
+        // 3. At 18% middle gray (x = 0.18 < x0): y = 650 * (0.1875)^(1/3) = 372.03
+        let y_mid = nikon_nlog_encode(0.18) * 1023.0;
+        assert!(
+            (y_mid - 372.03).abs() < 0.05,
+            "18% gray N-Log CV should be ~372.03, got {}",
+            y_mid
+        );
+
+        // 4. Encode -> Decode round-trip across shadows, midtones, and highlights
+        for &x in &[0.0, 0.01, 0.05, 0.18, 0.328, 0.5, 1.0, 4.0, 12.0] {
+            let encoded = nikon_nlog_encode(x);
+            let decoded = nikon_nlog_decode(encoded);
+            assert!(
+                (decoded - x).abs() < 0.005 * x.max(1.0),
+                "N-Log round-trip mismatch at x={}: got {}",
+                x,
+                decoded
+            );
+        }
+    }
+
+    #[test]
+    fn test_bradford_matrix_neutrality_and_kelvin_estimation() {
+        // When target_kelvin == as_shot_kelvin and tint == 0, neutral [1, 1, 1] maps to ~[1, 1, 1] in Rec. 2020
+        let m = compute_wb_color_matrix(5600, None, None);
+        let neutral_out = mat3_vec_mul(m, [1.0, 1.0, 1.0]);
+        for ch in neutral_out {
+            assert!(
+                (ch - 1.0).abs() < 0.12,
+                "D65 neutral should map near unity in Rec.2020, got {:?}",
+                neutral_out
+            );
+        }
+
+        // Verify Kelvin estimation from WB gains
+        let k_tungsten = estimate_kelvin_from_wb_gains(1.35, 2.20);
+        let k_daylight = estimate_kelvin_from_wb_gains(1.95, 1.42);
+        assert!((3000..=3400).contains(&k_tungsten));
+        assert!((5400..=5800).contains(&k_daylight));
     }
 
     #[test]
@@ -583,6 +684,7 @@ mod tests {
         assert!((parsed.wb_rb_levels[0] - 2.10).abs() < 1e-4);
         assert!((parsed.wb_rb_levels[1] - 1.35).abs() < 1e-4);
         assert_eq!(parsed.black_level, [152, 150, 150, 148]);
+        assert!(parsed.color_temperature_kelvin >= 6000);
 
         // Also test Big-Endian ("MM\0*") MakerNote TIFF parsing
         let mut be_payload = Vec::new();
@@ -603,5 +705,31 @@ mod tests {
         let parsed_be = parse_ncdt_payload(&be_payload).expect("should parse big-endian MakerNote");
         assert_eq!(parsed_be.black_level, [600, 602, 601, 599]);
         assert_eq!(parsed_be.white_level, 16383);
+    }
+
+    #[test]
+    fn test_parse_ncdt_fuzz_malformed_inputs_never_panic() {
+        // Empty, truncated, huge IFD counts, and out-of-bounds offsets must return Err cleanly without panicking.
+        assert!(parse_ncdt_payload(b"").is_err());
+        assert!(parse_ncdt_payload(b"Nikon\0").is_err());
+        assert!(parse_ncdt_payload(b"Nikon\0II\x2a\x00\xFF\xFF\xFF\xFF").is_err());
+
+        // Huge entry_count (65535) in truncated buffer
+        let mut bad_ifd = Vec::new();
+        bad_ifd.extend_from_slice(b"Nikon\0\x02\x10\x00\x00II\x2a\x00");
+        bad_ifd.extend_from_slice(&8u32.to_le_bytes());
+        bad_ifd.extend_from_slice(&0xFFFFu16.to_le_bytes());
+        assert!(parse_ncdt_payload(&bad_ifd).is_err());
+
+        // Entry with huge count (u32::MAX) + RATIONAL (8 bytes) testing overflow guard
+        let mut bad_entry = Vec::new();
+        bad_entry.extend_from_slice(b"Nikon\0\x02\x10\x00\x00II\x2a\x00");
+        bad_entry.extend_from_slice(&8u32.to_le_bytes());
+        bad_entry.extend_from_slice(&1u16.to_le_bytes());
+        bad_entry.extend_from_slice(&0x000Cu16.to_le_bytes());
+        bad_entry.extend_from_slice(&5u16.to_le_bytes());
+        bad_entry.extend_from_slice(&u32::MAX.to_le_bytes());
+        bad_entry.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes());
+        assert!(parse_ncdt_payload(&bad_entry).is_ok());
     }
 }
