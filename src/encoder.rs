@@ -17,6 +17,7 @@ use core_foundation_sys::number::{
 };
 use core_foundation_sys::string::CFStringRef;
 use half::f16;
+use rayon::prelude::*;
 use thiserror::Error;
 
 use crate::demuxer::{AudioTrackInfo, TimecodeTrackInfo};
@@ -34,22 +35,33 @@ pub enum EncoderError {
     Metal(#[from] MetalPipelineError),
 }
 
-/// Target hardware Apple ProRes codec variant (`--codec <prores4444|prores422hq>`).
+/// Target QuickTime mastering video codec (`--codec <prores4444xq|prores4444|prores422hq|raw16>`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProResCodec {
+    /// Apple ProRes 4444 XQ (`ap4x`, 12-bit 4:4:4 Extreme Quality — highest ProRes mastering tier for 14-bit+ dynamic range)
+    ProRes4444XQ,
     /// Apple ProRes 4444 (`ap4h`, 12-bit 4:4:4)
     ProRes4444,
     /// Apple ProRes 422 HQ (`apch`, 10-bit 4:2:2)
     ProRes422HQ,
+    /// Uncompressed 16-Bit RGBA (`b64a`, lossless 16-bit 4:4:4:4 integer — preserves full >=14-bit/16-bit code values)
+    Uncompressed16Bit,
 }
 
 impl ProResCodec {
     #[inline]
     pub fn fourcc(self) -> [u8; 4] {
         match self {
+            ProResCodec::ProRes4444XQ => *b"ap4x",
             ProResCodec::ProRes4444 => *b"ap4h",
             ProResCodec::ProRes422HQ => *b"apch",
+            ProResCodec::Uncompressed16Bit => *b"b64a",
         }
+    }
+
+    #[inline]
+    pub fn is_hardware_prores(self) -> bool {
+        !matches!(self, ProResCodec::Uncompressed16Bit)
     }
 
     #[inline]
@@ -60,8 +72,12 @@ impl ProResCodec {
     #[inline]
     pub fn display_name(self) -> &'static str {
         match self {
+            ProResCodec::ProRes4444XQ => "Apple ProRes 4444 XQ (ap4x, 12-bit 4:4:4 XQ)",
             ProResCodec::ProRes4444 => "Apple ProRes 4444 (ap4h, 12-bit 4:4:4)",
             ProResCodec::ProRes422HQ => "Apple ProRes 422 HQ (apch, 10-bit 4:2:2)",
+            ProResCodec::Uncompressed16Bit => {
+                "Uncompressed 16-Bit RGB (b64a, 16-bit 4:4:4:4 Lossless)"
+            }
         }
     }
 }
@@ -768,14 +784,67 @@ extern "C" fn vt_decompression_output_callback(
     }
 }
 
-/// Decodes a single compressed Apple ProRes (`ap4h` or `apch`) frame back into `64RGBAHalf` (`Vec<f16>`)
-/// using Apple `VideoToolbox` (`VTDecompressionSession`) for end-to-end golden accuracy verification.
+/// Processes a Bayer RGGB frame on the Metal GPU in FP32 and packs it into lossless QuickTime
+/// `b64a` (64-bit ARGB, 16-bit unsigned big-endian integer `[A, R, G, B]` per pixel) to preserve
+/// full 14-bit / 16-bit code values with zero DCT compression.
+pub fn encode_uncompressed_b64a_frame_with_metal(
+    gpu: &mut MetalColorPipeline,
+    bayer_rggb: &[u16],
+    params: &ColorPipelineParams,
+    pts: u64,
+    duration: u32,
+) -> Result<EncodedProResPacket, EncoderError> {
+    let rgba_f16 = gpu.process_frame_to_rgba16f_vec(bayer_rggb, params)?;
+    let num_pixels = rgba_f16.len() / 4;
+    let mut packed = vec![0u8; num_pixels * 8];
+
+    packed
+        .par_chunks_mut(8)
+        .zip(rgba_f16.par_chunks(4))
+        .for_each(|(dst, px)| {
+            let r16 = (px[0].to_f32().clamp(0.0, 1.0) * 65535.0).round() as u16;
+            let g16 = (px[1].to_f32().clamp(0.0, 1.0) * 65535.0).round() as u16;
+            let b16 = (px[2].to_f32().clamp(0.0, 1.0) * 65535.0).round() as u16;
+            dst[0..2].copy_from_slice(&0xFFFFu16.to_be_bytes());
+            dst[2..4].copy_from_slice(&r16.to_be_bytes());
+            dst[4..6].copy_from_slice(&g16.to_be_bytes());
+            dst[6..8].copy_from_slice(&b16.to_be_bytes());
+        });
+
+    Ok(EncodedProResPacket {
+        pts,
+        duration,
+        data: packed,
+    })
+}
+
+/// Decodes a single compressed Apple ProRes (`ap4x`, `ap4h`, `apch`) or uncompressed 16-bit (`b64a`)
+/// frame back into `64RGBAHalf` (`Vec<f16>`) for end-to-end golden accuracy verification.
 pub fn decode_prores_frame_to_rgba16f(
     codec: ProResCodec,
     width: u32,
     height: u32,
     compressed_frame: &[u8],
 ) -> Result<Vec<f16>, EncoderError> {
+    if codec == ProResCodec::Uncompressed16Bit {
+        let num_pixels = (width as usize) * (height as usize);
+        if compressed_frame.len() < num_pixels * 8 {
+            return Err(EncoderError::VideoToolbox(-50, "b64a frame truncated"));
+        }
+        let mut out = Vec::with_capacity(num_pixels * 4);
+        for px in compressed_frame[..num_pixels * 8].as_chunks::<8>().0 {
+            let a = u16::from_be_bytes([px[0], px[1]]) as f32 / 65535.0;
+            let r = u16::from_be_bytes([px[2], px[3]]) as f32 / 65535.0;
+            let g = u16::from_be_bytes([px[4], px[5]]) as f32 / 65535.0;
+            let b = u16::from_be_bytes([px[6], px[7]]) as f32 / 65535.0;
+            out.push(f16::from_f32(r));
+            out.push(f16::from_f32(g));
+            out.push(f16::from_f32(b));
+            out.push(f16::from_f32(a));
+        }
+        return Ok(out);
+    }
+
     let state = Box::new(DecompressCallbackState {
         frame_rgba16f: Mutex::new(Err(-1)),
     });
@@ -1267,13 +1336,16 @@ fn build_video_trak_atom(
     sample_entry[40..44].copy_from_slice(&0x0048_0000u32.to_be_bytes()); // 72 dpi vert
     sample_entry[48..50].copy_from_slice(&1u16.to_be_bytes()); // frame_count = 1
     let compressor_name: &[u8] = match codec {
+        ProResCodec::ProRes4444XQ => b"\x14Apple ProRes 4444 XQ",
         ProResCodec::ProRes4444 => b"\x11Apple ProRes 4444",
         ProResCodec::ProRes422HQ => b"\x13Apple ProRes 422 HQ",
+        ProResCodec::Uncompressed16Bit => b"\x13Component Video RGB",
     };
     sample_entry[50..50 + compressor_name.len()].copy_from_slice(compressor_name);
     let depth: u16 = match codec {
-        ProResCodec::ProRes4444 => 32, // 4:4:4:4 container depth
+        ProResCodec::ProRes4444XQ | ProResCodec::ProRes4444 => 32, // 4:4:4:4 container depth
         ProResCodec::ProRes422HQ => 24,
+        ProResCodec::Uncompressed16Bit => 64, // 64-bit ARGB (16 bits per channel)
     };
     sample_entry[82..84].copy_from_slice(&depth.to_be_bytes());
     sample_entry[84..86].copy_from_slice(&(-1i16).to_be_bytes()); // color_table_id = -1

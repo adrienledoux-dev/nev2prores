@@ -187,7 +187,7 @@ impl TicoRawDecoder for NativeTicoRawDecoder {
         }
         let num_pixels = width * height;
 
-        // Case 1: TICO line-based subband / packed 12-bit / LeGall 5/3 wavelet bitstream
+        // Case 1: TICO line-based subband / packed 12-bit or 14-bit / LeGall 5/3 wavelet bitstream
         if bitstream.len() >= 16 && &bitstream[0..4] == TICORAW_MAGIC {
             let mode = u32::from_le_bytes([bitstream[4], bitstream[5], bitstream[6], bitstream[7]]);
             let payload = &bitstream[16..];
@@ -195,10 +195,12 @@ impl TicoRawDecoder for NativeTicoRawDecoder {
                 return unpack_12bit_parallel(payload, width, height);
             } else if mode == 2 {
                 return decode_levo_53_wavelet_parallel(payload, width, height);
+            } else if mode == 3 {
+                return unpack_14bit_parallel(payload, width, height);
             }
         }
 
-        // Case 2: Unpacked 16-bit RGGB buffer (`width * height * 2` bytes)
+        // Case 2: Unpacked 16-bit RGGB buffer (`width * height * 2` bytes — supports 12-bit, 14-bit, and 16-bit)
         if bitstream.len() == num_pixels * 2 {
             let mut out = vec![0u16; num_pixels];
             out.par_chunks_mut(width)
@@ -207,18 +209,23 @@ impl TicoRawDecoder for NativeTicoRawDecoder {
                     let src_off = row * width * 2;
                     let src = &bitstream[src_off..src_off + width * 2];
                     for (col, dst) in dst_row.iter_mut().enumerate() {
-                        *dst = u16::from_le_bytes([src[col * 2], src[col * 2 + 1]]) & 0x3FFF;
+                        *dst = u16::from_le_bytes([src[col * 2], src[col * 2 + 1]]);
                     }
                 });
             return Ok(out);
         }
 
-        // Case 3: Packed 12-bit RGGB buffer (`width * height * 3 / 2` bytes)
+        // Case 3: Packed 14-bit RGGB buffer (`width * height * 7 / 4` bytes -> 4 pixels per 7 bytes)
+        if bitstream.len() == (num_pixels * 7) / 4 {
+            return unpack_14bit_parallel(bitstream, width, height);
+        }
+
+        // Case 4: Packed 12-bit RGGB buffer (`width * height * 3 / 2` bytes -> 2 pixels per 3 bytes)
         if bitstream.len() == (num_pixels * 3) / 2 {
             return unpack_12bit_parallel(bitstream, width, height);
         }
 
-        // Case 4: Delegate to external `libticoraw_bridge.dylib` plugin if loaded
+        // Case 5: Delegate to external `libticoraw_bridge.dylib` plugin if loaded
         if let Some(ref plugin) = self.external_plugin {
             let mut out = vec![0u16; num_pixels];
             // SAFETY: `bitstream` has `bitstream.len()` valid bytes and `out` has `width * height` writable `u16` elements.
@@ -340,6 +347,81 @@ pub fn encode_ticoraw_test_frame(bayer: &[u16], width: usize, height: usize) -> 
         out.push(b0);
         out.push(b1);
         out.push(b2);
+    }
+
+    out
+}
+
+/// Unpacks a 14-bit packed RGGB bitstream (`7 bytes -> 4 u16 pixels` in `[0..16383]`) in parallel across rows/strips via `rayon`.
+fn unpack_14bit_parallel(
+    payload: &[u8],
+    width: usize,
+    height: usize,
+) -> Result<Vec<u16>, DecoderError> {
+    let num_pixels = width * height;
+    let required_bytes = (num_pixels * 7) / 4;
+    if payload.len() < required_bytes {
+        return Err(DecoderError::BitstreamTruncated {
+            expected: num_pixels,
+            actual: (payload.len() * 4) / 7,
+        });
+    }
+
+    let mut out = vec![0u16; num_pixels];
+    // Because both `width` and `height` are even, either `width` is a multiple of 4 (1-row strips)
+    // or `2 * width` is a multiple of 4 (2-row strips).
+    let rows_per_strip = if width.is_multiple_of(4) { 1 } else { 2 };
+    let strip_pixels = width * rows_per_strip;
+    let strip_bytes = (strip_pixels * 7) / 4;
+
+    out.par_chunks_mut(strip_pixels)
+        .enumerate()
+        .for_each(|(strip_idx, dst_strip)| {
+            let src_start = strip_idx * strip_bytes;
+            let src_strip = &payload[src_start..src_start + strip_bytes];
+            for quad_idx in 0..(strip_pixels / 4) {
+                let off = quad_idx * 7;
+                let word = u64::from_be_bytes([
+                    0,
+                    src_strip[off],
+                    src_strip[off + 1],
+                    src_strip[off + 2],
+                    src_strip[off + 3],
+                    src_strip[off + 4],
+                    src_strip[off + 5],
+                    src_strip[off + 6],
+                ]);
+                dst_strip[quad_idx * 4] = ((word >> 42) & 0x3FFF) as u16;
+                dst_strip[quad_idx * 4 + 1] = ((word >> 28) & 0x3FFF) as u16;
+                dst_strip[quad_idx * 4 + 2] = ((word >> 14) & 0x3FFF) as u16;
+                dst_strip[quad_idx * 4 + 3] = (word & 0x3FFF) as u16;
+            }
+        });
+
+    Ok(out)
+}
+
+/// Encodes a 14-bit RGGB Bayer frame (`[0..16383]`) into the 14-bit `TICO` bitstream format (`mode = 3`).
+pub fn encode_ticoraw_14bit_test_frame(bayer: &[u16], width: usize, height: usize) -> Vec<u8> {
+    let num_pixels = width * height;
+    assert_eq!(bayer.len(), num_pixels);
+    assert!(num_pixels.is_multiple_of(4));
+    let packed_len = (num_pixels * 7) / 4;
+    let mut out = Vec::with_capacity(16 + packed_len);
+
+    out.extend_from_slice(TICORAW_MAGIC);
+    out.extend_from_slice(&3u32.to_le_bytes()); // mode 3: 14-bit packed TICO subband
+    out.extend_from_slice(&(width as u32).to_le_bytes());
+    out.extend_from_slice(&(height as u32).to_le_bytes());
+
+    for quad in bayer.as_chunks::<4>().0 {
+        let s0 = (quad[0] & 0x3FFF) as u64;
+        let s1 = (quad[1] & 0x3FFF) as u64;
+        let s2 = (quad[2] & 0x3FFF) as u64;
+        let s3 = (quad[3] & 0x3FFF) as u64;
+        let word = (s0 << 42) | (s1 << 28) | (s2 << 14) | s3;
+        let bytes = word.to_be_bytes();
+        out.extend_from_slice(&bytes[1..8]);
     }
 
     out
@@ -469,6 +551,30 @@ mod tests {
             .expect("should decode 12-bit TICO frame");
 
         assert_eq!(orig, unpacked);
+    }
+
+    #[test]
+    fn test_ticoraw_14bit_pack_unpack_roundtrip() {
+        // Test both width % 4 == 0 (128x72) and width % 4 == 2 (130x70) across the full 14-bit [0..16383] range
+        for (width, height) in [(128usize, 72usize), (130usize, 70usize)] {
+            let orig: Vec<u16> = (0..(width * height))
+                .map(|i| ((i * 193 + 600) % 16384) as u16)
+                .collect();
+
+            let bitstream = encode_ticoraw_14bit_test_frame(&orig, width, height);
+            let decoder = NativeTicoRawDecoder::new();
+            let unpacked = decoder
+                .decode_frame(&bitstream, width, height)
+                .expect("should decode 14-bit TICO frame");
+            assert_eq!(orig, unpacked);
+
+            // Also verify headerless 14-bit packed payload (`(num_pixels * 7) / 4` bytes)
+            let raw_packed = &bitstream[16..];
+            let unpacked_raw = decoder
+                .decode_frame(raw_packed, width, height)
+                .expect("should decode raw 14-bit packed frame");
+            assert_eq!(orig, unpacked_raw);
+        }
     }
 
     #[test]

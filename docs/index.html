@@ -22,7 +22,7 @@
     "name": "nev2prores Studio",
     "operatingSystem": "macOS 13+",
     "applicationCategory": "MultimediaApplication",
-    "softwareVersion": "0.2.0",
+    "softwareVersion": "0.2.1",
     "license": "https://www.apache.org/licenses/LICENSE-2.0",
     "url": "https://adrienledoux-dev.github.io/nev2prores/",
     "downloadUrl": "https://github.com/adrienledoux-dev/nev2prores/releases/latest/download/nev2prores.dmg",
@@ -558,13 +558,13 @@
         fetchpriority="high"
       >
       <div><span class="eyebrow">Open-Source macOS Apple Silicon Tool • Apache-2.0</span></div>
-      <h1>Nikon N-RAW (<code>.nev</code>) to 12-Bit Apple ProRes 4444 &amp; N-Log Studio</h1>
+      <h1>Nikon N-RAW (<code>.nev</code>) to ProRes 4444 XQ, 16-Bit RGB &amp; N-Log Studio</h1>
       <p class="hero-subtitle">
-        A zero-FFmpeg native Rust, Apple Metal, and VideoToolbox studio &amp; CLI for grading Nikon Z8 / Z9 RAW video in scene-linear light (Kelvin, Tint, Exposure, 3D LUTs &amp; RGB Scopes) before encoding 12-bit ProRes 4444 with Final Cut Pro FCPXML v1.11 metadata.
+        A zero-FFmpeg native Rust, Apple Metal, and VideoToolbox studio &amp; CLI for grading 12-bit &amp; 14-bit Nikon RAW video in 32-bit float scene-linear light (Kelvin, Tint, Exposure, 3D LUTs &amp; RGB Scopes) before exporting ProRes 4444 XQ / 4444 or lossless 16-bit RGB with Final Cut Pro FCPXML v1.11 metadata.
       </p>
       <div class="cta-row">
         <a class="btn btn-primary" href="https://github.com/adrienledoux-dev/nev2prores/releases/latest/download/nev2prores.dmg">
-          Download nev2prores.dmg (macOS 13+ Apple Silicon)
+          ⬇ Download nev2prores.dmg (macOS Apple Silicon)
         </a>
         <a class="btn btn-secondary" href="https://github.com/adrienledoux-dev/nev2prores/issues/new?template=feature_request.yml">
           Suggest an Improvement
@@ -574,7 +574,7 @@
         </a>
       </div>
       <p class="meta-note">
-        Requires Apple Silicon (M1 / M2 / M3 / M4) running macOS 13 Ventura or later • Includes both <code>nev2prores Studio.app</code> &amp; <code>nev2prores</code> CLI
+        Compatible with all Apple Silicon Macs (M-series — M1 through M5 / M6 &amp; newer) running macOS 13 Ventura or later • Includes both <code>nev2prores Studio.app</code> &amp; <code>nev2prores</code> CLI
       </p>
     </section>
 
@@ -595,23 +595,23 @@
         </article>
         <article class="card">
           <span class="step-badge">STAGE 02 • RAYON CPU POOL</span>
-          <h3>Bounded TicoRAW Bitstream Pipeline</h3>
+          <h3>12-Bit &amp; 14-Bit TicoRAW Bitstream Pipeline</h3>
           <p>
-            Parallel frame unpacking across Apple Silicon P-cores using a bounded ring buffer so RAM stays flat even on 100+ GB 8K clips, with optional <code>NEV2PRORES_TICORAW_DYLIB</code> C ABI plugin loading.
+            Parallel 12-bit &amp; 14-bit RGGB frame unpacking across Apple Silicon P-cores using a bounded ring buffer so RAM stays flat even on 100+ GB 8K clips, with optional <code>NEV2PRORES_TICORAW_DYLIB</code> C ABI plugin loading.
           </p>
         </article>
         <article class="card">
           <span class="step-badge">STAGE 03 • METAL COMPUTE</span>
-          <h3>5×5 Debayer, Bradford WB &amp; Official N-Log</h3>
+          <h3>5×5 FP32 Debayer, Bradford WB &amp; Official N-Log</h3>
           <p>
-            Shared-memory FP32 Metal compute shader executing Malvar-He-Cutler demosaicing, neutral highlight reconstruction, scene-linear Exposure &amp; Bradford chromatic adaptation into ITU-R BT.2020, and continuous Nikon N-Log encoding.
+            Shared-memory 32-bit float Metal compute shader executing Malvar-He-Cutler demosaicing, neutral highlight reconstruction, scene-linear Exposure &amp; Bradford chromatic adaptation into ITU-R BT.2020, and continuous Nikon N-Log encoding.
           </p>
         </article>
         <article class="card">
-          <span class="step-badge">STAGE 04 • VIDEOTOOLBOX</span>
-          <h3>12-Bit ProRes 4444 &amp; FCPXML v1.11</h3>
+          <span class="step-badge">STAGE 04 • VIDEOTOOLBOX &amp; 16-BIT</span>
+          <h3>ProRes 4444 XQ / 4444, 16-Bit RGB &amp; FCPXML v1.11</h3>
           <p>
-            IOSurface-backed <code>VTCompressionSession</code> encoding for ProRes 4444 (<code>ap4h</code>) and 422 HQ (<code>apch</code>), muxed with Rec. 2020 <code>colr</code> (<code>9-1-9</code>), 24-bit little-endian PCM audio (<code>wave/enda</code>), <code>tmcd</code>, and Final Cut Pro XML sidecars.
+            IOSurface-backed <code>VTCompressionSession</code> encoding for ProRes 4444 XQ (<code>ap4x</code>), 4444 (<code>ap4h</code>), 422 HQ (<code>apch</code>), plus lossless 16-bit RGBA (<code>b64a</code>), muxed with Rec. 2020 <code>colr</code> (<code>9-1-9</code>), 24-bit PCM audio, and Final Cut Pro XML sidecars.
           </p>
         </article>
         <article class="card">

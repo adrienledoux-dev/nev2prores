@@ -8,22 +8,29 @@ use nev2prores::encoder::ProResCodec;
 use nev2prores::gui::run_native_gui;
 use nev2prores::metal_pipeline::{MetalColorPipeline, ScaleMode};
 use nev2prores::{
-    generate_sample_nev_file, print_inspection_report, transcode_nev_file, TranscodeOptions,
+    generate_sample_nev_file_with_bit_depth, print_inspection_report, transcode_nev_file,
+    TranscodeOptions,
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum CliCodec {
+    #[value(name = "prores4444xq", alias = "ap4x")]
+    Prores4444xq,
     #[value(name = "prores4444", alias = "ap4h")]
     Prores4444,
     #[value(name = "prores422hq", alias = "apch")]
     Prores422hq,
+    #[value(name = "raw16", alias = "b64a")]
+    Raw16,
 }
 
 impl From<CliCodec> for ProResCodec {
     fn from(c: CliCodec) -> Self {
         match c {
+            CliCodec::Prores4444xq => ProResCodec::ProRes4444XQ,
             CliCodec::Prores4444 => ProResCodec::ProRes4444,
             CliCodec::Prores422hq => ProResCodec::ProRes422HQ,
+            CliCodec::Raw16 => ProResCodec::Uncompressed16Bit,
         }
     }
 }
@@ -61,12 +68,12 @@ pub struct CliArgs {
     #[arg(long = "output", short = 'o', value_name = "DIR")]
     pub output: Option<PathBuf>,
 
-    /// Target Apple ProRes hardware codec (`prores4444` = 12-bit 4:4:4 `ap4h`, `prores422hq` = 10-bit 4:2:2 `apch`)
+    /// Target mastering codec (`prores4444xq` = `ap4x`, `prores4444` = `ap4h`, `prores422hq` = `apch`, `raw16` = lossless 16-bit `b64a`)
     #[arg(
         long = "codec",
         value_enum,
         default_value = "prores4444",
-        value_name = "prores4444|prores422hq"
+        value_name = "prores4444xq|prores4444|prores422hq|raw16"
     )]
     pub codec: CliCodec,
 
@@ -107,9 +114,13 @@ pub struct CliArgs {
     #[arg(long = "inspect-only")]
     pub inspect_only: bool,
 
-    /// Generate a synthetic 1920x1080 12-bit RGGB Nikon Z9 `.nev` test file at `--input` before running
+    /// Generate a synthetic 1920x1080 RGGB `.nev` test file at `--input` before running
     #[arg(long = "generate-sample")]
     pub generate_sample: bool,
+
+    /// Sensor bit depth (`12` or `14`) when using `--generate-sample`
+    #[arg(long = "sample-bit-depth", default_value_t = 12)]
+    pub sample_bit_depth: u16,
 
     /// Launch the native macOS Studio GUI (`egui` / Metal live RAW preview, Kelvin/Tint/EV sliders, and batch queue)
     #[arg(long = "gui")]
@@ -151,7 +162,7 @@ fn main() -> Result<()> {
     if args.gui || args.input.is_none() {
         if let Some(ref input_path) = args.input {
             if args.generate_sample {
-                generate_sample_nev_file(input_path)?;
+                generate_sample_nev_file_with_bit_depth(input_path, args.sample_bit_depth)?;
             }
         }
         return run_native_gui(args.input, args.output);
@@ -159,9 +170,10 @@ fn main() -> Result<()> {
 
     let input_path = args.input.as_ref().unwrap();
     if args.generate_sample {
-        generate_sample_nev_file(input_path)?;
+        generate_sample_nev_file_with_bit_depth(input_path, args.sample_bit_depth)?;
         println!(
-            "[nev2prores] Generated synthetic 1920x1080 12-bit N-RAW sample (24 frames) at '{}'",
+            "[nev2prores] Generated synthetic 1920x1080 {}-bit N-RAW sample (24 frames) at '{}'",
+            if args.sample_bit_depth >= 14 { 14 } else { 12 },
             input_path.display()
         );
     }
